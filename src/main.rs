@@ -99,6 +99,7 @@ impl MsgQueue {
 
     /// Dequeue specified id's data (Request) from specified queue_id's queue.
     /// If that data does not exist, return None.
+    #[allow(clippy::manual_map)]
     fn dequeue_with_id(&self, queue_id: i32, msg_id: i32) -> Option<Request> {
         if let Some(queue) = self.hash.read().unwrap().get(&queue_id) {
             let mut queue = queue.lock().unwrap();
