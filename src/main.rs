@@ -123,6 +123,31 @@ impl MsgQueue {
             None
         }
     }
+
+    /// Return MsgQueueStat about all queues mapped.
+    fn status(&self) -> MsgQueueStat {
+        let msgs_per_vecs = self.hash.read().unwrap().values().map(|queue| {
+            queue
+                .lock()
+                .unwrap()
+                .len()
+                .try_into()
+                .unwrap()
+        });
+        MsgQueueStat {
+            stattype: 0,
+            num_of_messages: msgs_per_vecs.clone().sum(),
+            num_of_queues: self.hash.read().unwrap().len().try_into().unwrap(),
+            max_messages: msgs_per_vecs.max().unwrap(),
+        }
+    }
+}
+#[derive(Serialize, Debug)]
+struct MsgQueueStat{
+    stattype: i32,
+    num_of_messages: i32,
+    num_of_queues: i32,
+    max_messages: i32,
 }
 
 #[actix_web::main]
@@ -217,7 +242,7 @@ fn treat_push_req(_msg: Request, _queue: Queue) -> Response {
 }
 
 /// Return HELO_ACK
-fn treat_helo_req(msg: Request, _queue: Queue) -> Response {
+fn treat_helo_req(msg: Request, queue: Queue) -> Response {
     let ack = Response::new(
         MsgType::MSG_HELO_ACK,
         MY_ID,
@@ -237,12 +262,12 @@ fn treat_stat_req(msg: Request, _queue: Queue) -> Response {
         MY_ID,
         msg.saddr,
         msg.id,
-        String::from("stat res"),
+        serde_json::to_string(&_queue.status()).unwrap(),
     )
 }
 
 /// Return GBYE_ACK
-fn treat_gbye_req(msg: Request, _queue: Queue) -> Response {
+fn treat_gbye_req(msg: Request, queue: Queue) -> Response {
     let ack = Response::new(
         MsgType::MSG_GBYE_ACK,
         MY_ID,
