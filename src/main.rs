@@ -86,6 +86,17 @@ impl MsgQueue {
         }
     }
 
+    /// Add new vec to hash with specified queue_id.
+    fn add_queue(&self, queue_id: i32) {
+        let queue = Arc::new(Mutex::new(Vec::new()));
+        self.hash.write().unwrap().insert(queue_id, queue);
+    }
+
+    ///Remove queue with specified queue_id.
+    fn remove_queue(&self, queue_id: i32) {
+        self.hash.write().unwrap().remove(&queue_id);
+    }
+
     /// If specified queue_id's queue already exists, enqueue data (Request).
     /// Else, create queue with specified queue_id, and enqueue data.
     fn enqueue(&self, data: Request, queue_id: i32) {
@@ -207,13 +218,16 @@ fn treat_push_req(_msg: Request, _queue: Queue) -> Response {
 
 /// Return HELO_ACK
 fn treat_helo_req(msg: Request, _queue: Queue) -> Response {
-    Response::new(
+    let ack = Response::new(
         MsgType::MSG_HELO_ACK,
         MY_ID,
         msg.saddr,
         msg.id,
         String::default(),
-    )
+    );
+    let queue_id = msg.saddr;
+    queue.add_queue(queue_id);
+    ack
 }
 
 /// Return STAT_RES
@@ -229,11 +243,14 @@ fn treat_stat_req(msg: Request, _queue: Queue) -> Response {
 
 /// Return GBYE_ACK
 fn treat_gbye_req(msg: Request, _queue: Queue) -> Response {
-    Response::new(
+    let ack = Response::new(
         MsgType::MSG_GBYE_ACK,
         MY_ID,
         msg.saddr,
         msg.id,
         String::default(),
-    )
+    );
+    let queue_id = msg.saddr;
+    queue.remove_queue(queue_id);
+    ack
 }
