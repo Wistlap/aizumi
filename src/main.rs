@@ -1,158 +1,16 @@
+pub mod messaging;
+pub mod queue;
+
 use actix_web::{web, App, HttpServer, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use messaging::{MsgType, Request, Response};
+use queue::{MsgQueuePool, Queue};
 use std::process::exit;
-use std::sync::{Arc, Mutex, RwLock};
 
 const MY_ID: i32 = 5000;
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Request {
-    msg_type: MsgType,
-    saddr: i32,
-    daddr: i32,
-    id: i32,
-    payload: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct Response {
-    code: i32,
-    status: String,
-    msg_type: MsgType,
-    saddr: i32,
-    daddr: i32,
-    id: i32,
-    payload: String,
-}
-
-impl Response {
-    fn new(msg_type: MsgType, saddr: i32, daddr: i32, id: i32, payload: String) -> Self {
-        Self {
-            msg_type,
-            saddr,
-            daddr,
-            id,
-            payload,
-            ..Default::default()
-        }
-    }
-}
-
-impl Default for Response {
-    fn default() -> Self {
-        Self {
-            code: 200,
-            status: String::from("OK"),
-            msg_type: MsgType::default(),
-            saddr: 0,
-            daddr: 0,
-            id: 0,
-            payload: String::default(),
-        }
-    }
-}
-
-#[allow(non_camel_case_types)]
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default)]
-enum MsgType {
-    #[default]
-    MSG_SEND_REQ = 1,
-    MSG_SEND_ACK = 2,
-    MSG_RECV_REQ = 3,
-    MSG_RECV_ACK = 4,
-    MSG_FREE_REQ = 5,
-    MSG_FREE_ACK = 6,
-    MSG_PUSH_REQ = 7,
-    MSG_PUSH_ACK = 8,
-    MSG_HELO_REQ = 9,
-    MSG_HELO_ACK = 10,
-    MSG_STAT_REQ = 11,
-    MSG_STAT_RES = 12,
-    MSG_GBYE_REQ = 13,
-    MSG_GBYE_ACK = 14,
-}
-
-type Queue = web::Data<MsgQueue>;
-
-struct MsgQueue {
-    hash: RwLock<HashMap<i32, Arc<Mutex<Vec<Request>>>>>,
-}
-
-impl MsgQueue {
-    fn new() -> Self {
-        Self {
-            hash: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Add new vec to hash with specified queue_id.
-    fn add_queue(&self, queue_id: i32) {
-        let queue = Arc::new(Mutex::new(Vec::new()));
-        self.hash.write().unwrap().insert(queue_id, queue);
-    }
-
-    ///Remove queue with specified queue_id.
-    fn remove_queue(&self, queue_id: i32) {
-        self.hash.write().unwrap().remove(&queue_id);
-    }
-
-    /// If specified queue_id's queue already exists, enqueue data (Request).
-    /// Else, create queue with specified queue_id, and enqueue data.
-    fn enqueue(&self, data: Request, queue_id: i32) {
-        if let Some(queue) = self.hash.read().unwrap().get(&queue_id) {
-            queue.lock().unwrap().push(data);
-            return;
-        }
-        let queue = Arc::new(Mutex::new(vec![data]));
-        self.hash.write().unwrap().insert(queue_id, queue);
-    }
-
-    /// Dequeue specified id's data (Request) from specified queue_id's queue.
-    /// If that data does not exist, return None.
-    #[allow(clippy::manual_map)]
-    fn dequeue_with_id(&self, queue_id: i32, msg_id: i32) -> Option<Request> {
-        if let Some(queue) = self.hash.read().unwrap().get(&queue_id) {
-            let mut queue = queue.lock().unwrap();
-            if let Some(idx) = queue.iter().position(|msg| msg.id == msg_id) {
-                Some(queue.remove(idx))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Return MsgQueueStat about all queues mapped.
-    fn status(&self) -> MsgQueueStat {
-        let msgs_per_vecs = self.hash.read().unwrap().values().map(|queue| {
-            queue
-                .lock()
-                .unwrap()
-                .len()
-                .try_into()
-                .unwrap()
-        });
-        MsgQueueStat {
-            stattype: 0,
-            num_of_messages: msgs_per_vecs.clone().sum(),
-            num_of_queues: self.hash.read().unwrap().len().try_into().unwrap(),
-            max_messages: msgs_per_vecs.max().unwrap(),
-        }
-    }
-}
-#[derive(Serialize, Debug)]
-struct MsgQueueStat{
-    stattype: i32,
-    num_of_messages: i32,
-    num_of_queues: i32,
-    max_messages: i32,
-}
-
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let queue = web::Data::new(MsgQueue::new());
+    let queue = web::Data::new(MsgQueuePool::new());
 
     HttpServer::new(move || {
         App::new()
@@ -262,7 +120,8 @@ fn treat_stat_req(msg: Request, _queue: Queue) -> Response {
         MY_ID,
         msg.saddr,
         msg.id,
-        serde_json::to_string(&_queue.status()).unwrap(),
+        // serde_json::to_string(&_queue.status()).unwrap(),
+        serde_json::to_string("").unwrap(),
     )
 }
 
