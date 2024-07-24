@@ -61,7 +61,7 @@ fn treat_send_req(msg: Request, queue: Queue) -> Response {
 
 /// Pop msg from queue and return RECV_ACK
 fn treat_recv_req(msg: Request, queue: Queue) -> Response {
-    let msg = queue.dequeue_with_id(msg.saddr, msg.id);
+    let msg = queue.dequeue(msg.saddr);
     if let Some(msg) = msg {
         Response::new(
             MsgType::MSG_RECV_ACK,
@@ -100,17 +100,14 @@ fn treat_push_req(_msg: Request, _queue: Queue) -> Response {
 }
 
 /// Return HELO_ACK
-fn treat_helo_req(msg: Request, queue: Queue) -> Response {
-    let ack = Response::new(
+fn treat_helo_req(msg: Request, _queue: Queue) -> Response {
+    Response::new(
         MsgType::MSG_HELO_ACK,
         MY_ID,
         msg.saddr,
         msg.id,
         String::default(),
-    );
-    let queue_id = msg.saddr;
-    queue.add_queue(queue_id);
-    ack
+    )
 }
 
 /// Return STAT_RES

@@ -4,10 +4,41 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-pub type Queue = web::Data<MsgQueuePool>;
+pub struct MsgQueue {
+    queue: Arc<Mutex<Vec<Request>>>,
+}
 
 pub struct MsgQueuePool {
-    hash: RwLock<HashMap<i32, Arc<Mutex<Vec<Request>>>>>,
+    hash: RwLock<HashMap<i32, MsgQueue>>,
+}
+
+pub type Queue = web::Data<MsgQueuePool>;
+
+impl MsgQueue {
+    pub fn new() -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Enqueue data (Request).
+    pub fn enqueue(&self, data: Request) {
+        self.queue.lock().unwrap().push(data);
+    }
+
+    /// Dequeue data (Request).
+    /// If queue is empty, return None.
+    pub fn dequeue(&self) -> Option<Request> {
+        self.queue.lock().unwrap().pop()
+    }
+
+    // /// Return MsgQueueStat.
+    // pub fn status(&self) -> MsgQueueStat {
+    //     MsgQueueStat {
+    //         stattype: 0,
+    //         num_of_messages: self.queue.lock().unwrap().len() as i32,
+    //     }
+    // }
 }
 
 impl MsgQueuePool {
@@ -18,8 +49,7 @@ impl MsgQueuePool {
     }
 
     /// Add new vec to hash with specified queue_id.
-    pub fn add_queue(&self, queue_id: i32) {
-        let queue = Arc::new(Mutex::new(Vec::new()));
+    fn add_queue(&self, queue_id: i32, queue: MsgQueue) {
         self.hash.write().unwrap().insert(queue_id, queue);
     }
 
@@ -32,24 +62,20 @@ impl MsgQueuePool {
     /// Else, create queue with specified queue_id, and enqueue data.
     pub fn enqueue(&self, data: Request, queue_id: i32) {
         if let Some(queue) = self.hash.read().unwrap().get(&queue_id) {
-            queue.lock().unwrap().push(data);
+            queue.enqueue(data);
             return;
         }
-        let queue = Arc::new(Mutex::new(vec![data]));
-        self.hash.write().unwrap().insert(queue_id, queue);
+        let queue = MsgQueue::new();
+        queue.enqueue(data);
+        self.add_queue(queue_id, queue)
     }
 
     /// Dequeue specified id's data (Request) from specified queue_id's queue.
     /// If that data does not exist, return None.
     #[allow(clippy::manual_map)]
-    pub fn dequeue_with_id(&self, queue_id: i32, msg_id: i32) -> Option<Request> {
+    pub fn dequeue(&self, queue_id: i32) -> Option<Request> {
         if let Some(queue) = self.hash.read().unwrap().get(&queue_id) {
-            let mut queue = queue.lock().unwrap();
-            if let Some(idx) = queue.iter().position(|msg| msg.id == msg_id) {
-                Some(queue.remove(idx))
-            } else {
-                None
-            }
+            queue.dequeue()
         } else {
             None
         }
