@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Request {
     pub msg_type: MsgType,
     pub saddr: i32,
@@ -9,7 +9,7 @@ pub struct Request {
     pub payload: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Response {
     pub code: i32,
     pub status: String,
