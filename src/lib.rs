@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use actix_web::middleware;
 use actix_web::middleware::Logger;
-use actix_web::web::Data;
-use actix_web::HttpServer;
 use actix_web::web;
+use actix_web::web::Data;
+use actix_web::web::Json;
+use actix_web::HttpServer;
+use actix_web::Responder;
 use actix_web::Result;
 use openraft::Config;
 
@@ -17,7 +19,6 @@ use queue::{MsgQueuePool, Queue};
 use std::process::exit;
 
 use crate::app::App;
-use crate::network::api;
 use crate::network::management;
 use crate::network::raft;
 use crate::network::Network;
@@ -38,7 +39,6 @@ pub type NodeId = u64;
 
 const MY_ID: i32 = 5000;
 
-
 openraft::declare_raft_types!(
     /// Declare the type configuration for example K/V store.
     pub TypeConfig:
@@ -57,7 +57,8 @@ pub mod typ {
     use crate::TypeConfig;
 
     pub type RaftError<E = openraft::error::Infallible> = openraft::error::RaftError<NodeId, E>;
-    pub type RPCError<E = openraft::error::Infallible> = openraft::error::RPCError<NodeId, BasicNode, RaftError<E>>;
+    pub type RPCError<E = openraft::error::Infallible> =
+        openraft::error::RPCError<NodeId, BasicNode, RaftError<E>>;
 
     pub type ClientWriteError = openraft::error::ClientWriteError<NodeId, BasicNode>;
     pub type CheckIsLeaderError = openraft::error::CheckIsLeaderError<NodeId, BasicNode>;
@@ -86,7 +87,6 @@ pub async fn start_example_raft_node(node_id: NodeId, http_addr: String) -> std:
     // Create the network layer that will connect and communicate the raft instances and
     // will be used in conjunction with the store created above.
     let network = Network {};
-
 
     // Create a local raft instance.
     let raft = openraft::Raft::new(
@@ -141,11 +141,9 @@ pub async fn start_example_raft_node(node_id: NodeId, http_addr: String) -> std:
     x.run().await
 }
 
-async fn submit(msg: web::Json<Request>, queue: Queue) -> Result<web::Json<Response>> {
-    let msg = msg.into_inner();
-    let res = treat_msg(msg, queue);
-
-    Ok(web::Json(res))
+pub async fn submit(app: Data<App>, req: Json<Request>) -> actix_web::Result<impl Responder> {
+    let response = app.raft.client_write(req.0).await;
+    Ok(Json(response))
 }
 
 fn treat_msg(msg: Request, queue: Queue) -> Response {
@@ -254,4 +252,3 @@ fn treat_gbye_req(msg: Request, queue: Queue) -> Response {
     queue.remove_queue(queue_id);
     ack
 }
-

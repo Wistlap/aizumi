@@ -1,5 +1,11 @@
 # すべきこと
 
+
+## network/api.rs の代わりコード
+* /write の代わりになるコード
+    * / に MsgType=Send，
+
+
 ## 今後のコードイメージ
 * API: / (POST) のままでいい
 * / に届いた Msg の MsgType に応じて raft::client_write, raft::clinet_read 的なコードを呼び出す (今の network/api.rs がやっていること)
