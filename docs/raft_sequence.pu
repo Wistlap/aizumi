@@ -1,0 +1,49 @@
+@startuml raft
+
+actor client
+client --> "/": JSON<Reqest>
+activate "/"
+
+box "Actix-Web\n(Raft Leader)" #White
+participant "/"
+participant client_write
+participant Raft
+participant append_entries
+
+"/" -> client_write : JSON<Request>
+activate client_write
+client_write -> Raft: Request
+activate Raft
+Raft -> append_entries: ApplicationEntriesRequest
+activate append_entries
+append_entries --> "/append" : JSON<ApplicationEntriesRequest>
+activate "/append"
+end box
+
+box "Actix-Web\n(Raft Follower)" #White
+participant "/append"
+participant "Raft "
+participant apply
+
+"/append" -> "Raft ": ApplicationEntriesRequest
+activate "Raft "
+"Raft " -> apply: Vec<Entries>
+activate apply
+"Raft " <- apply: Vec<Response>
+deactivate apply
+"/append" <- "Raft " : ApplicationEntriesResponse
+deactivate "Raft "
+append_entries <-- "/append": JSON<ApplicationEntriesResponse>
+deactivate "/append"
+end box
+
+Raft <- append_entries: ApplicationEntriesResponse
+deactivate append_entries
+client_write <- Raft: Response
+deactivate Raft
+"/" <- client_write: Response
+deactivate client_write
+client <-- "/": JSON<Response>
+deactivate "/"
+
+@enduml
