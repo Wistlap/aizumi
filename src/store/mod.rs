@@ -1,6 +1,5 @@
 mod log_store;
 
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::io::Cursor;
 use std::sync::atomic::AtomicU64;
@@ -23,11 +22,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-use crate::queue::{MsgQueue, MsgQueuePool};
+use crate::messaging::treat_msg;
+use crate::messaging::Response;
+use crate::queue::MsgQueuePool;
 use crate::NodeId;
 use crate::TypeConfig;
-
-use crate::messaging::{Request, Response};
 
 pub use log_store::LogStore;
 
@@ -142,18 +141,15 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
             sm.last_applied_log = Some(entry.log_id);
 
             match entry.payload {
-                EntryPayload::Blank => res.push(Response { value: None }),
-                EntryPayload::Normal(ref req) => match req {
-                    Request::Set { key, value } => {
-                        sm.data.insert(key.clone(), value.clone());
-                        res.push(Response {
-                            value: Some(value.clone()),
-                        })
-                    }
-                },
+                EntryPayload::Blank => res.push(Response::default()),
+                EntryPayload::Normal(req) => {
+                    let queue = &mut sm.data;
+                    let id = entry.log_id.leader_id.node_id;
+                    res.push(treat_msg(req, queue, id.try_into().unwrap()))
+                }
                 EntryPayload::Membership(ref mem) => {
                     sm.last_membership = StoredMembership::new(Some(entry.log_id), mem.clone());
-                    res.push(Response { value: None })
+                    res.push(Response::default())
                 }
             };
         }

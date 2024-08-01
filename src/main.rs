@@ -1,15 +1,17 @@
+use aizumi::start_raft_node;
 use clap::Parser;
-use raft_kv_memstore::start_example_raft_node;
 use tracing_subscriber::EnvFilter;
 
+const MY_ID: u64 = 5000;
+
 #[derive(Parser, Clone, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version, about)]
 pub struct Opt {
-    #[clap(long)]
+    #[arg(short, long, default_value_t = MY_ID)]
     pub id: u64,
 
-    #[clap(long)]
-    pub http_addr: String,
+    #[arg(short, long, default_value = "127.0.0.1:8080")]
+    pub addr: String,
 }
 
 #[actix_web::main]
@@ -26,5 +28,5 @@ async fn main() -> std::io::Result<()> {
     // Parse the parameters passed by arguments.
     let options = Opt::parse();
 
-    start_example_raft_node(options.id, options.http_addr).await
+    start_raft_node(options.id, options.addr).await
 }
