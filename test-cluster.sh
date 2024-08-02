@@ -2,51 +2,10 @@
 
 set -o errexit
 
-SERVER_NAME="aizumi"
-DEFAULT_IP="127.0.0.1"
+. ./function.sh
 
 cargo build
 mkdir -p log
-
-kill() {
-    if [ "$(uname)" = "Darwin" ]; then
-        SERVICE=$SERVER_NAME
-        if pgrep -xq -- "${SERVICE}"; then
-            pkill -f "${SERVICE}"
-        fi
-    else
-        set +e # killall will error if finds no process to kill
-        killall $SERVER_NAME
-        set -e
-    fi
-}
-
-rpc() {
-    local uri=$1
-    local body="$2"
-
-    echo '---'" rpc(:$uri, $body)"
-
-    {
-        if [ ".$body" = "." ]; then
-            # time curl --silent "$DEFAULT_IP:$uri"
-            curl --silent "$DEFAULT_IP:$uri"
-        else
-            # time curl --silent "$DEFAULT_IP:$uri" -H "Content-Type: application/json" -d "$body"
-            curl --silent "$DEFAULT_IP:$uri" -H "Content-Type: application/json" -d "$body"
-        fi
-    } | {
-        if type jq > /dev/null 2>&1; then
-            # jq
-            cat
-        else
-            cat
-        fi
-    }
-
-    echo
-    echo
-}
 
 export RUST_LOG=trace
 export RUST_BACKTRACE=full
@@ -54,7 +13,7 @@ export RUST_BACKTRACE=full
 echo "****************************************"
 echo "Killing all running $SERVER_NAME server"
 sleep 1
-kill
+kill_all_nodes
 echo "****************************************"
 echo
 sleep 1
@@ -201,7 +160,7 @@ sleep 2
 
 echo "****************************************"
 echo "Killing all nodes..."
-kill
+kill_all_nodes
 echo "Done"
 echo "****************************************"
 echo
