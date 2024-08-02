@@ -142,3 +142,6 @@ response 形式 (JSON)
     "msg_type": "MSG_GBYE_ACK"
 }
 ```
+
+## Raft sequence
+![](docs/raft_sequence.svg)
