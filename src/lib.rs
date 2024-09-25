@@ -13,6 +13,11 @@ mod test;
 use std::io::Cursor;
 use std::sync::Arc;
 
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use futures::future::ok;
+
 use actix_web::middleware;
 use actix_web::middleware::Logger;
 use actix_web::web;
@@ -81,7 +86,7 @@ pub async fn start_raft_node(node_id: NodeId, http_addr: String) -> std::io::Res
     let network = Network {};
 
     // Create a local raft instance.
-    let raft = openraft::Raft::new(
+    let raft = Arc::new(openraft::Raft::new(
         node_id,
         config.clone(),
         network,
@@ -89,18 +94,34 @@ pub async fn start_raft_node(node_id: NodeId, http_addr: String) -> std::io::Res
         state_machine_store.clone(),
     )
     .await
-    .unwrap();
+    .unwrap());
 
     // Create an application that will store all the instances created above, this will
     // later be used on the actix-web services.
     let app_data = Data::new(App {
         id: node_id,
         addr: http_addr.clone(),
-        raft,
+        raft: Arc::clone(&raft),
         log_store,
         state_machine_store,
         config,
     });
+
+
+    // start_broker() と start_axtic_web_server() を並列に呼び出す
+    let axtic_web_server = tokio::spawn(start_axtic_web_server(http_addr.clone(), app_data.clone()));
+    let broker = tokio::spawn(start_broker(http_addr.clone(), app_data.clone()));
+
+    broker.await?;
+    axtic_web_server.await?;
+
+    Ok(())
+}
+
+pub async fn start_axtic_web_server(
+    http_addr: String,
+    app_data: Data<App>,
+) -> std::io::Result<()> {
 
     // Start the actix-web server.
     let server = HttpServer::new(move || {
@@ -134,4 +155,48 @@ pub async fn submit(app: Data<App>, req: Json<Request>) -> Result<Json<Response>
         Err(_) => Response::create_error_response(),
     };
     Ok(Json(res))
+}
+
+pub async fn start_broker(
+    http_addr: String,
+    app_data: Data<App>
+) -> std::io::Result<()> {
+
+    // NOTE: http 通信 と tcp通信でそれぞれ別のポートを使っている
+    let listener = TcpListener::bind("127.0.0.1:21010").await?;
+    // setsockopt(&listener, sockopt::ReuseAddr, &true)?;
+
+    loop{
+        let (stream, _) = listener.accept().await?;
+
+        let app = app_data.clone();
+        tokio::spawn(treat_client(stream, app));
+    }
+}
+
+pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
+    let mut buf = [0; 1024];
+    loop {
+        // クライアントからのデータを受信
+        match stream.read(&mut buf).await {
+            Ok(0) => {
+                println!("Client disconnected.");
+                break;
+            }
+            Ok(n) => {
+                let req: Json<Request> = Json(serde_json::from_slice(&buf[..n]).unwrap());
+                let req = req.into_inner();
+                let res = match app.raft.client_write(req).await {
+                    Ok(res) => res.data,
+                    Err(_) => Response::create_error_response(),
+                };
+                // resをJSON形式に変換し，クライアントに送信
+                let res = serde_json::to_string(&res).unwrap();
+                stream.write_all(res.as_bytes()).await.unwrap();
+            }
+            Err(_) => {
+                println!("Error occurred, terminating connection with {}", stream.peer_addr().unwrap());
+            }
+        }
+    }
 }
