@@ -11,7 +11,7 @@ kill_all_nodes() {
         fi
     else
         set +e # killall will error if finds no process to kill
-        killall $SERVER_NAME
+        killall -9 $SERVER_NAME
         set -e
     fi
 }
