@@ -112,8 +112,8 @@ pub async fn start_raft_node(node_id: NodeId, http_addr: String) -> std::io::Res
     let axtic_web_server = tokio::spawn(start_axtic_web_server(http_addr.clone(), app_data.clone()));
     let broker = tokio::spawn(start_broker(http_addr.clone(), app_data.clone()));
 
-    broker.await?;
     axtic_web_server.await?;
+    broker.await?;
 
     Ok(())
 }
