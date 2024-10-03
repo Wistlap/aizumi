@@ -74,11 +74,11 @@ fn main() -> std::io::Result<()> {
         // サーバからのレスポンスを受信
         let mut buffer = [0; 1024];
         let _n = stream.read(&mut buffer)?;
-        // println!("{}", String::from_utf8_lossy(&buffer));
+        println!("{}", String::from_utf8_lossy(&buffer));
 
     }
     let elapsed = start.elapsed();
-    println!("Elapsed: {}.{:03} seconds", elapsed.as_secs(), elapsed.subsec_millis());
+    println!("(sender) Elapsed: {}.{:03} seconds", elapsed.as_secs(), elapsed.subsec_millis());
 
     Ok(())
 }

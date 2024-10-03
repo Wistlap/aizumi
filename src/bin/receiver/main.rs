@@ -10,13 +10,13 @@ use std::fmt::Display;
 #[command(author, version, about)]
 pub struct Args {
 
-    #[arg(short = 'm', long, default_value_t = String::from("MSG_SEND_REQ"))]
+    #[arg(short = 'm', long, default_value_t = String::from("MSG_PUSH_ACK"))]
     pub msg_type: String,
 
-    #[arg(short = 's', long, default_value_t = 1)]
+    #[arg(short = 's', long, default_value_t = 100)]
     pub saddr: u32,
 
-    #[arg(short = 'd', long, default_value_t = 100)]
+    #[arg(short = 'd', long, default_value_t = 5000)]
     pub daddr: u32,
 
     #[arg(short = 'i', long, default_value_t = 0)]
@@ -49,36 +49,63 @@ fn main() -> std::io::Result<()> {
     // stream.set_nodelay(true)?;
     // stream.set_nonblocking(true)?;
 
+    let json_data = json!({
+        "msg_type": "MSG_HELO_REQ",
+        "saddr": args.saddr,
+        "daddr": args.daddr,
+        "id": 0,
+        "payload": "hello"
+    }).to_string();
+
+    // JSONデータを送信
+    let res = stream.write(json_data.as_bytes());
+    if let Err(e) = res {
+        eprintln!("Failed to send JSON: {}", e);
+        return Err(e);
+    }
+
+    stream.flush()?;
+
+    // サーバからのレスポンスを受信
+    let mut buffer = [0; 1024];
+    let _n = stream.read(&mut buffer)?;
+    // 受信したメッセージを表示
+    let msg = String::from_utf8_lossy(&buffer).to_string();
+    println!("{}", msg);
+
     let n = args.id + args.loop_times;
 
     let start = time::Instant::now();
-    for i in args.id..n {
-        // 送信するJSONデータ
-        let json_data = json!({
+    for _i in args.id..n {
+
+        println!("{}",_i);
+        // サーバからのリクエストを受信
+        let _n = stream.read(&mut buffer)?;
+        let msg = String::from_utf8_lossy(&buffer).to_string();
+        println!("{}", msg);
+        // let req: serde_json::Value = serde_json::from_str(&msg).unwrap();
+
+        // 送信するJSONデータ(レスポンス)
+        let response = json!({
             "msg_type": args.msg_type,
             "saddr": args.saddr,
             "daddr": args.daddr,
-            "id": i,
-            "payload": "hello"
+            "id": 0,
+            "payload": ""
         }).to_string();
 
         // JSONデータを送信
-        let res = stream.write(json_data.as_bytes());
+        let res = stream.write(response.as_bytes());
         if let Err(e) = res {
             eprintln!("Failed to send JSON: {}", e);
             return Err(e);
         }
-
         stream.flush()?;
-
-        // サーバからのレスポンスを受信
-        let mut buffer = [0; 1024];
-        let _n = stream.read(&mut buffer)?;
-        // println!("{}", String::from_utf8_lossy(&buffer));
-
+        // 送信したメッセージを表示
+        println!("{}", response);
     }
     let elapsed = start.elapsed();
-    println!("Elapsed: {}.{:03} seconds", elapsed.as_secs(), elapsed.subsec_millis());
+    println!("(receiver) Elapsed: {}.{:03} seconds", elapsed.as_secs(), elapsed.subsec_millis());
 
     Ok(())
 }

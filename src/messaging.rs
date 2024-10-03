@@ -1,4 +1,4 @@
-use crate::queue::MsgQueuePool;
+use crate::queue::{MsgQueue, MsgQueuePool};
 use serde::{Deserialize, Serialize};
 use std::process::exit;
 
@@ -20,6 +20,18 @@ pub struct Response {
     pub daddr: i32,
     pub id: i32,
     pub payload: String,
+}
+
+impl Request {
+    pub fn new(msg_type: MsgType, saddr: i32, daddr: i32, id: i32, payload: String) -> Self {
+        Self {
+            msg_type,
+            saddr,
+            daddr,
+            id,
+            payload,
+        }
+    }
 }
 
 impl Response {
@@ -143,16 +155,35 @@ fn treat_free_req(msg: Request, _queue: &mut MsgQueuePool, id: i32) -> Response 
 }
 
 /// Not support
-fn treat_push_req(_msg: Request, _queue: &mut MsgQueuePool, _id: i32) -> Response {
-    Response {
-        code: 400,
-        status: String::from("Bad Request"),
-        ..Response::default()
+fn treat_push_req(msg: Request, queue: &mut MsgQueuePool, id: i32) -> Response {
+    let msg = queue.dequeue(msg.daddr);
+    if let Some(msg) = msg {
+        Response::new(
+            MsgType::MSG_PUSH_REQ,
+            id,
+            msg.daddr,
+            msg.id,
+            msg.payload,
+        )
+    } else {
+        Response {
+            code: 404,
+            status: String::from("Not Found"),
+            ..Response::default()
+        }
     }
+    // Response {
+    //     code: 400,
+    //     status: String::from("Bad Request"),
+    //     ..Response::default()
+    // }
 }
 
 /// Return HELO_ACK
-fn treat_helo_req(msg: Request, _queue: &mut MsgQueuePool, id: i32) -> Response {
+fn treat_helo_req(msg: Request, queue: &mut MsgQueuePool, id: i32) -> Response {
+    if queue.is_exist(&msg.saddr) {
+        queue.add_queue(msg.saddr, MsgQueue::new());
+    }
     Response::new(
         MsgType::MSG_HELO_ACK,
         id,

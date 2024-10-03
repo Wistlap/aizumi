@@ -51,7 +51,7 @@ impl MsgQueuePool {
     }
 
     /// Add new vec to hash with specified queue_id.
-    fn add_queue(&mut self, queue_id: i32, queue: MsgQueue) {
+    pub fn add_queue(&mut self, queue_id: i32, queue: MsgQueue) {
         self.hash.insert(queue_id, queue);
     }
 
@@ -83,6 +83,21 @@ impl MsgQueuePool {
         }
     }
 
+    /// Return if specified queue_id's queue is empty.
+    #[allow(clippy::manual_map)]
+    pub fn is_empty(&self, queue_id: i32) -> bool {
+        if let Some(queue) = self.hash.get(&queue_id) {
+            queue.queue.lock().unwrap().is_empty()
+        } else {
+            true
+        }
+    }
+
+    /// Return if specified queue_id's queue exists.
+    pub fn is_exist(&self, queue_id: &i32) -> bool {
+        self.hash.contains_key(queue_id)
+    }
+
     // /// Return MsgQueueStat about all queues mapped.
     // fn status(&self) -> MsgQueueStat {
     //     let msgs_per_vecs = self.hash.read().unwrap().values().map(|queue| {
@@ -102,6 +117,7 @@ impl MsgQueuePool {
     // }
 }
 #[derive(Serialize, Debug)]
+#[allow(dead_code)]
 struct MsgQueueStat {
     stattype: i32,
     num_of_messages: i32,
