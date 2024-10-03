@@ -1,9 +1,10 @@
 use std::{io::{Read, Write}, net::TcpStream};
-use serde_json::json;
 use std::time;
 
 pub use clap::Parser;
 use std::fmt::Display;
+
+use aizumi::messaging::{Request, Response};
 
 /// Command-line Argument of m-broker-rs
 #[derive(Parser, Debug)]
@@ -53,28 +54,35 @@ fn main() -> std::io::Result<()> {
 
     let start = time::Instant::now();
     for i in args.id..n {
-        // 送信するJSONデータ
-        let json_data = json!({
-            "msg_type": args.msg_type,
-            "saddr": args.saddr,
-            "daddr": args.daddr,
-            "id": i,
-            "payload": "hello"
-        }).to_string();
+        // Requestを作成
+        let req = Request::new(
+            args.msg_type.as_str().parse().unwrap(),
+            args.saddr as i32,
+            args.daddr as i32,
+            i as i32,
+            String::from("hello")
+        );
 
-        // JSONデータを送信
-        let res = stream.write(json_data.as_bytes());
+        // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
+        // req を &[u8] に変換
+        let raw_req = bincode::serialize(&req).unwrap();
+        let mut formatted_req:[u8; 1024] = [0; 1024];
+        formatted_req[..raw_req.len()].copy_from_slice(&raw_req);
+
+        // Request を送信
+        let res = stream.write(&formatted_req);
         if let Err(e) = res {
-            eprintln!("Failed to send JSON: {}", e);
+            eprintln!("Failed to send data: {}", e);
             return Err(e);
         }
-
         stream.flush()?;
 
         // サーバからのレスポンスを受信
         let mut buffer = [0; 1024];
         let _n = stream.read(&mut buffer)?;
-        // println!("{}", String::from_utf8_lossy(&buffer));
+        // 受信したメッセージを Response 構造体にデシリアライズ
+        let _res: Response = bincode::deserialize(&buffer).unwrap();
+        // println!("{:?}", _res);
 
     }
     let elapsed = start.elapsed();

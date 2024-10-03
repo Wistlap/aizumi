@@ -199,7 +199,8 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                 break;
             }
             Ok(Ok(n)) => {
-                let req: Request = serde_json::from_slice(&buf[..n]).unwrap();
+                // 受信したメッセージを Request 構造体にデシリアライズ
+                let req: Request = bincode::deserialize(&buf[..n]).unwrap();
 
                 match req.msg_type {
                     MsgType::MSG_SEND_REQ |
@@ -213,9 +214,14 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                             Ok(res) => res.data,
                             Err(_) => Response::create_error_response(),
                         };
-                        // resをJSON形式に変換し，クライアントに送信
-                        let res = serde_json::to_string(&res).unwrap();
-                        stream.write_all(res.as_bytes()).await.unwrap();
+                        // resをシリアライズし，クライアントに送信
+                        // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
+                        // req を &[u8] に変換
+                        let raw_res = bincode::serialize(&res).unwrap();
+                        let mut formatted_res:[u8; 1024] = [0; 1024];
+                        formatted_res[..raw_res.len()].copy_from_slice(&raw_res);
+                        // let res = serde_json::to_string(&res).unwrap();
+                        stream.write_all(&formatted_res).await.unwrap();
                     }
                     MsgType::MSG_FREE_REQ => {
                         //
@@ -228,8 +234,14 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                                 Ok(res) => res.data,
                                 Err(_) => Response::create_error_response(),
                             };
-                            let res = serde_json::to_string(&res).unwrap();
-                            stream.write_all(res.as_bytes()).await.unwrap();
+                            // resをシリアライズし，クライアントに送信
+                            // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
+                            // req を &[u8] に変換
+                            let raw_res = bincode::serialize(&res).unwrap();
+                            let mut formatted_res:[u8; 1024] = [0; 1024];
+                            formatted_res[..raw_res.len()].copy_from_slice(&raw_res);
+                            // let res = serde_json::to_string(&res).unwrap();
+                            stream.write_all(&formatted_res).await.unwrap();
                         }
                     }
                     MsgType::MSG_STAT_REQ => {
@@ -257,8 +269,14 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                         Ok(res) => res.data,
                         Err(_) => Response::create_error_response(),
                     };
-                    let res = serde_json::to_string(&res).unwrap();
-                    stream.write_all(res.as_bytes()).await.unwrap();
+                    // resをシリアライズし，クライアントに送信
+                    // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
+                    // req を &[u8] に変換
+                    let raw_res = bincode::serialize(&res).unwrap();
+                    let mut formatted_res:[u8; 1024] = [0; 1024];
+                    formatted_res[..raw_res.len()].copy_from_slice(&raw_res);
+                    // let res = serde_json::to_string(&res).unwrap();
+                    stream.write_all(&formatted_res).await.unwrap();
                 }
             }
         }

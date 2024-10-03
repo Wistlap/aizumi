@@ -1,6 +1,8 @@
 use crate::queue::{MsgQueue, MsgQueuePool};
 use serde::{Deserialize, Serialize};
 use std::process::exit;
+use std::str::FromStr;
+use std::fmt;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Request {
@@ -92,6 +94,39 @@ pub enum MsgType {
     MSG_GBYE_REQ = 13,
     MSG_GBYE_ACK = 14,
 }
+
+impl FromStr for MsgType {
+
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "MSG_SEND_REQ" => Ok(MsgType::MSG_SEND_REQ),
+            "MSG_SEND_ACK" => Ok(MsgType::MSG_SEND_ACK),
+            "MSG_RECV_REQ" => Ok(MsgType::MSG_RECV_REQ),
+            "MSG_RECV_ACK" => Ok(MsgType::MSG_RECV_ACK),
+            "MSG_FREE_REQ" => Ok(MsgType::MSG_FREE_REQ),
+            "MSG_FREE_ACK" => Ok(MsgType::MSG_FREE_ACK),
+            "MSG_PUSH_REQ" => Ok(MsgType::MSG_PUSH_REQ),
+            "MSG_PUSH_ACK" => Ok(MsgType::MSG_PUSH_ACK),
+            "MSG_HELO_REQ" => Ok(MsgType::MSG_HELO_REQ),
+            "MSG_HELO_ACK" => Ok(MsgType::MSG_HELO_ACK),
+            "MSG_STAT_REQ" => Ok(MsgType::MSG_STAT_REQ),
+            "MSG_STAT_RES" => Ok(MsgType::MSG_STAT_RES),
+            "MSG_GBYE_REQ" => Ok(MsgType::MSG_GBYE_REQ),
+            "MSG_GBYE_ACK" => Ok(MsgType::MSG_GBYE_ACK),
+            _ => Err(format!("'{}' is not a valid MsgType", s)),
+        }
+    }
+}
+
+impl fmt::Display for MsgType {
+
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 
 pub fn treat_msg(msg: Request, queue: &mut MsgQueuePool, id: i32) -> Response {
     match msg.msg_type {
