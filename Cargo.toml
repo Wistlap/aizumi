@@ -12,12 +12,12 @@ name = "tcp_client"
 path = "src/bin/tcp_client/main.rs"
 
 [[bin]]
-name = "sender"
-path = "src/bin/sender/main.rs"
+name = "m-sender"
+path = "src/bin/m-sender/main.rs"
 
 [[bin]]
-name = "receiver"
-path = "src/bin/receiver/main.rs"
+name = "m-receiver"
+path = "src/bin/m-receiver/main.rs"
 
 [dependencies]
 actix-web = "4"

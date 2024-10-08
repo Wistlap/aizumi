@@ -190,6 +190,7 @@ fn treat_free_req(msg: Request, _queue: &mut MsgQueuePool, id: i32) -> Response 
 }
 
 /// Not support
+// TODO: ブローカからクライアントへのリクエストであるのに，Response を返している
 fn treat_push_req(msg: Request, queue: &mut MsgQueuePool, id: i32) -> Response {
     let msg = queue.dequeue(msg.daddr);
     if let Some(msg) = msg {

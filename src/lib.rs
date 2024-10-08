@@ -10,7 +10,10 @@ pub mod store;
 #[cfg(test)]
 mod test;
 
-use std::io::Cursor;
+use core::arch::x86_64::_rdtsc;
+use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
+use std::io::{Cursor, Write};
 use std::sync::Arc;
 
 use tokio::net::{TcpListener, TcpStream};
@@ -107,6 +110,9 @@ pub async fn start_raft_node(node_id: NodeId, http_addr: String) -> std::io::Res
         config,
     });
 
+    let mut file = File::create("timestamp.log").unwrap();
+    let header = "id,msg_type,tsc\n";
+    file.write_all(header.as_bytes()).unwrap();
 
     // start_broker() と start_axtic_web_server() を並列に呼び出す
     let axtic_web_server = tokio::spawn(start_axtic_web_server(http_addr.clone(), app_data.clone()));
@@ -189,6 +195,7 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
     let mut client_id = 0;
     let mut buf = [0; 1024];
     let timeout_dur = 1;
+    let mut tsc_log = VecDeque::new();
 
     loop {
         // 1ms以内にメッセージを受信する
@@ -206,6 +213,11 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                     MsgType::MSG_SEND_REQ |
                     MsgType::MSG_RECV_REQ |
                     MsgType::MSG_HELO_REQ => {
+                        let msg_id = req.id;
+                        let msg_type = req.msg_type;
+                        let tsc = unsafe { _rdtsc() };
+                        tsc_log.push_back((msg_id, msg_type, tsc));
+
                         if client_id == 0 {
                             // クライアントIDを設定
                             client_id = req.saddr;
@@ -234,6 +246,10 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                                 Ok(res) => res.data,
                                 Err(_) => Response::create_error_response(),
                             };
+                            let msg_id = res.id;
+                            let msg_type = res.msg_type;
+                            let tsc = unsafe { _rdtsc() };
+                            tsc_log.push_back((msg_id, msg_type, tsc));
                             // resをシリアライズし，クライアントに送信
                             // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
                             // req を &[u8] に変換
@@ -269,6 +285,10 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                         Ok(res) => res.data,
                         Err(_) => Response::create_error_response(),
                     };
+                    let msg_id = res.id;
+                    let msg_type = res.msg_type;
+                    let tsc = unsafe { _rdtsc() };
+                    tsc_log.push_back((msg_id, msg_type, tsc));
                     // resをシリアライズし，クライアントに送信
                     // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
                     // req を &[u8] に変換
@@ -281,4 +301,9 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
             }
         }
     }
+    let mut file = OpenOptions::new().append(true).create(true).open("timestamp.log").unwrap();
+    tsc_log.iter().for_each(|(msg_id, msg_type, tsc)| {
+        let content = format!("{:?},{:?},{:?}\n", msg_id, msg_type, tsc);
+        file.write_all(content.as_bytes()).unwrap();
+    });
 }

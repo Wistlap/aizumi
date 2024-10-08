@@ -85,7 +85,7 @@ fn main() -> std::io::Result<()> {
         let _n = stream.read(&mut buffer)?;
         // 受信したメッセージを Response 構造体にデシリアライズ
         let _msg: Response = bincode::deserialize(&buffer).unwrap();
-        println!("{:?}", _msg);
+        // println!("{:?}", _msg);
 
         // Requestを作成
         let req = Request::new(
