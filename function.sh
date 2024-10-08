@@ -42,3 +42,7 @@ rpc() {
     echo
     echo
 }
+
+is_receiver_working() {
+    test $(ps | grep m-receiver | wc -l) != 0
+}
