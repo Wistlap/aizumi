@@ -15,14 +15,16 @@ use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Write};
 use std::sync::Arc;
+use std::os::fd::AsRawFd;
 
-use tokio::net::{TcpListener, TcpStream};
+use nix::sys::socket::{self, setsockopt, sockopt, SockaddrIn};
+
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{timeout, Duration};
 
 use actix_web::middleware;
 use actix_web::middleware::Logger;
-use actix_web::web;
 use actix_web::web::Data;
 use actix_web::web::Json;
 use actix_web::HttpServer;
@@ -34,8 +36,9 @@ use app::App;
 use messaging::Request;
 use messaging::Response;
 use messaging::MsgType;
+use messaging::RPC;
+use messaging::RpcType;
 use network::management;
-use network::raft;
 use network::Network;
 
 openraft::declare_raft_types!(
@@ -86,7 +89,9 @@ pub async fn start_raft_node(node_id: NodeId, http_addr: String) -> std::io::Res
 
     // Create the network layer that will connect and communicate the raft instances and
     // will be used in conjunction with the store created above.
-    let network = Network {};
+    let network = Network {
+        my_addr: http_addr.clone(),
+    };
 
     // Create a local raft instance.
     let raft = Arc::new(openraft::Raft::new(
@@ -115,11 +120,15 @@ pub async fn start_raft_node(node_id: NodeId, http_addr: String) -> std::io::Res
     file.write_all(header.as_bytes()).unwrap();
 
     // start_broker() と start_axtic_web_server() を並列に呼び出す
+    // let runtime = tokio::runtime::Runtime::new().unwrap();
     let axtic_web_server = tokio::spawn(start_axtic_web_server(http_addr.clone(), app_data.clone()));
     let broker = tokio::spawn(start_broker(http_addr.clone(), app_data.clone()));
+    let udp_server = tokio::spawn(start_udp_serve(http_addr.clone(), app_data.clone()));
+    // let _udp_server = tokio::task::spawn_blocking(move || runtime.block_on(start_udp_serve(http_addr.clone(), app_data.clone())));
 
     let _ = axtic_web_server.await?;
     let _ = broker.await?;
+    let _ = udp_server.await?;
 
     Ok(())
 }
@@ -137,16 +146,16 @@ pub async fn start_axtic_web_server(
             .wrap(middleware::Compress::default())
             .app_data(app_data.clone())
             // raft internal RPC
-            .service(raft::append)
-            .service(raft::snapshot)
-            .service(raft::vote)
+            // .service(raft::append)
+            // .service(raft::snapshot)
+            // .service(raft::vote)
             // admin API
             .service(management::init)
             .service(management::add_learner)
             .service(management::change_membership)
             .service(management::metrics)
             // application API
-            .route("/", web::post().to(submit))
+            // .route("/", web::post().to(submit))
     });
 
     let x = server.bind(http_addr)?;
@@ -161,6 +170,81 @@ pub async fn submit(app: Data<App>, req: Json<Request>) -> Result<Json<Response>
         Err(_) => Response::create_error_response(),
     };
     Ok(Json(res))
+}
+
+pub async fn start_udp_serve(
+    addr: String,
+    app_data: Data<App>
+) -> std::io::Result<()> {
+
+    // Create a UDP soket with libc
+    // This is needed to set sockopt (ReuseAddr) to new socket before bind
+    // Std library does not provide socket creation without bind
+    let socket = socket::socket(
+        socket::AddressFamily::Inet,
+        socket::SockType::Datagram,
+        socket::SockFlag::empty(),
+        None,
+    )
+    .unwrap();
+
+    let mut parts = addr.split(':');
+    let ip = parts.next().unwrap();
+    let (octet1, octet2, octet3, octet4): (u8, u8, u8, u8) = {
+        let mut parts = ip.split('.').map(|x| x.parse::<u8>().unwrap());
+        (
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+            parts.next().unwrap(),
+        )
+    };
+    let port = parts.next().unwrap().parse().unwrap();
+
+    // Set sockopt (ReuseAddr, ReusePort) to newly-created socket
+    setsockopt(&socket, sockopt::ReuseAddr, &true).unwrap();
+    setsockopt(&socket, sockopt::ReusePort, &true).unwrap();
+
+    // Bind the socket
+    socket::bind(socket.as_raw_fd(), &SockaddrIn::new(octet1, octet2, octet3, octet4, port)).unwrap();
+
+    // // Create std's UdpSocket from nix's socket
+    let socket = UdpSocket::from_std(std::net::UdpSocket::from(socket)).unwrap();
+
+    // let socket = UdpSocket::bind(addr).await?;
+    let mut buf = [0; 1024 * 32];
+
+    tracing::info!("UDP server started at {}", addr);
+
+    loop {
+        let (n, peer) = socket.recv_from(&mut buf).await?;
+        tracing::debug!("Received {} bytes from {}", n, peer);
+        let rpc: RPC = bincode::deserialize(&buf[..n]).unwrap();
+        match rpc.rpc_type {
+            RpcType::AppendEntries => {
+                tracing::debug!("Received AppendEntries RPC from {}", peer);
+                let req: openraft::raft::AppendEntriesRequest<TypeConfig> = bincode::deserialize(&rpc.request).unwrap();
+                tracing::debug!("Request: {:?}", req);
+                let res = app_data.raft.append_entries(req).await;
+                let res = bincode::serialize(&res).unwrap();
+                socket.send_to(&res, peer).await?;
+            }
+            RpcType::InstallSnapshot => {
+                tracing::debug!("Received InstallSnapshot RPC from {}", peer);
+                let req: openraft::raft::InstallSnapshotRequest<TypeConfig> = bincode::deserialize(&rpc.request).unwrap();
+                let res = app_data.raft.install_snapshot(req).await;
+                let res = bincode::serialize(&res).unwrap();
+                socket.send_to(&res, peer).await?;
+            }
+            RpcType::Vote => {
+                tracing::debug!("Received Vote RPC from {}", peer);
+                let req: openraft::raft::VoteRequest<NodeId> = bincode::deserialize(&rpc.request).unwrap();
+                let res = app_data.raft.vote(req).await;
+                let res = bincode::serialize(&res).unwrap();
+                socket.send_to(&res, peer).await?;
+            }
+        }
+    }
 }
 
 pub async fn start_broker(
@@ -186,11 +270,13 @@ pub async fn start_broker(
         // stream.set_nodelay(true)?;
 
         let app = app_data.clone();
-        tokio::spawn(treat_client(stream, app));
+        tokio::task::spawn_blocking(move || tokio::runtime::Runtime::new().unwrap().block_on(treat_client(stream, app)));
     }
 }
 
 pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
+
+    tracing::info!("Client {} connected.", stream.peer_addr().unwrap());
 
     let mut client_id = 0;
     let mut buf = [0; 1024];

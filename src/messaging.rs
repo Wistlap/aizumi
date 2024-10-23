@@ -24,6 +24,12 @@ pub struct Response {
     pub payload: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RPC {
+    pub rpc_type: RpcType,
+    pub request: Vec<u8>,
+}
+
 impl Request {
     pub fn new(msg_type: MsgType, saddr: i32, daddr: i32, id: i32, payload: String) -> Self {
         Self {
@@ -127,6 +133,12 @@ impl fmt::Display for MsgType {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum RpcType {
+    AppendEntries,
+    InstallSnapshot,
+    Vote,
+}
 
 pub fn treat_msg(msg: Request, queue: &mut MsgQueuePool, id: i32) -> Response {
     match msg.msg_type {

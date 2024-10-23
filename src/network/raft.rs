@@ -11,7 +11,7 @@ use crate::NodeId;
 use crate::TypeConfig;
 
 // --- Raft communication
-
+// NOTE: After Implementing UDP communication, no longer do not need the following functions
 #[post("/raft-vote")]
 pub async fn vote(app: Data<App>, req: Json<VoteRequest<NodeId>>) -> actix_web::Result<impl Responder> {
     let res = app.raft.vote(req.0).await;
