@@ -1,15 +1,17 @@
 use super::Request;
 use actix_web::web;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
+#[derive(Serialize, Debug, Deserialize, Clone, Default)]
 pub struct MsgQueue {
     queue: Arc<Mutex<Vec<Request>>>,
 }
 
+#[derive(Serialize, Debug, Deserialize, Clone, Default)]
 pub struct MsgQueuePool {
-    hash: RwLock<HashMap<i32, MsgQueue>>,
+    hash: HashMap<i32, MsgQueue>,
 }
 
 pub type Queue = web::Data<MsgQueuePool>;
@@ -44,24 +46,24 @@ impl MsgQueue {
 impl MsgQueuePool {
     pub fn new() -> Self {
         Self {
-            hash: RwLock::new(HashMap::new()),
+            hash: HashMap::new(),
         }
     }
 
     /// Add new vec to hash with specified queue_id.
-    fn add_queue(&self, queue_id: i32, queue: MsgQueue) {
-        self.hash.write().unwrap().insert(queue_id, queue);
+    pub fn add_queue(&mut self, queue_id: i32, queue: MsgQueue) {
+        self.hash.insert(queue_id, queue);
     }
 
     ///Remove queue with specified queue_id.
-    pub fn remove_queue(&self, queue_id: i32) {
-        self.hash.write().unwrap().remove(&queue_id);
+    pub fn remove_queue(&mut self, queue_id: i32) {
+        self.hash.remove(&queue_id);
     }
 
     /// If specified queue_id's queue already exists, enqueue data (Request).
     /// Else, create queue with specified queue_id, and enqueue data.
-    pub fn enqueue(&self, data: Request, queue_id: i32) {
-        if let Some(queue) = self.hash.read().unwrap().get(&queue_id) {
+    pub fn enqueue(&mut self, data: Request, queue_id: i32) {
+        if let Some(queue) = self.hash.get(&queue_id) {
             queue.enqueue(data);
             return;
         }
@@ -74,11 +76,26 @@ impl MsgQueuePool {
     /// If that data does not exist, return None.
     #[allow(clippy::manual_map)]
     pub fn dequeue(&self, queue_id: i32) -> Option<Request> {
-        if let Some(queue) = self.hash.read().unwrap().get(&queue_id) {
+        if let Some(queue) = self.hash.get(&queue_id) {
             queue.dequeue()
         } else {
             None
         }
+    }
+
+    /// Return if specified queue_id's queue is empty.
+    #[allow(clippy::manual_map)]
+    pub fn is_empty(&self, queue_id: i32) -> bool {
+        if let Some(queue) = self.hash.get(&queue_id) {
+            queue.queue.lock().unwrap().is_empty()
+        } else {
+            true
+        }
+    }
+
+    /// Return if specified queue_id's queue exists.
+    pub fn is_exist(&self, queue_id: &i32) -> bool {
+        self.hash.contains_key(queue_id)
     }
 
     // /// Return MsgQueueStat about all queues mapped.
@@ -100,6 +117,7 @@ impl MsgQueuePool {
     // }
 }
 #[derive(Serialize, Debug)]
+#[allow(dead_code)]
 struct MsgQueueStat {
     stattype: i32,
     num_of_messages: i32,
