@@ -1,7 +1,3 @@
-use std::os::fd::AsRawFd;
-
-use nix::sys::socket::{self, setsockopt, sockopt, SockaddrIn};
-
 use openraft::error::InstallSnapshotError;
 use openraft::error::NetworkError;
 use openraft::error::RemoteError;
@@ -18,24 +14,22 @@ use openraft::raft::VoteResponse;
 use openraft::BasicNode;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::net::UdpSocket;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
 use crate::messaging::{self, RpcType};
 use crate::typ;
 use crate::NodeId;
 use crate::TypeConfig;
 
-pub struct Network {
-    pub my_addr: String,
-}
+pub struct Network {}
 
 impl Network {
-    // FIXME: メソッドが呼び出されるたびにソケットを作成している
-    // NetworkConnection にソケットを持たせるべきか？
     pub async fn send_rpc<Req, Resp, Err>(
         &self,
         target: NodeId,
-        target_node: &BasicNode,
+        stream: &mut TcpStream,
         prc_type: RpcType,
         req: Req,
     ) -> Result<Resp, openraft::error::RPCError<NodeId, BasicNode, Err>>
@@ -44,53 +38,14 @@ impl Network {
         Err: std::error::Error + DeserializeOwned,
         Resp: DeserializeOwned,
     {
-        let src = &self.my_addr;
-        let dst = &target_node.addr;
-
-        // Create a UDP soket with libc
-        // This is needed to set sockopt (ReuseAddr) to new socket before bind
-        // Std library does not provide socket creation without bind
-        let socket = socket::socket(
-            socket::AddressFamily::Inet,
-            socket::SockType::Datagram,
-            socket::SockFlag::empty(),
-            None,
-        )
-        .unwrap();
-
-        let mut parts = src.split(':');
-        let ip = parts.next().unwrap();
-        let (octet1, octet2, octet3, octet4): (u8, u8, u8, u8) = {
-            let mut parts = ip.split('.').map(|x| x.parse::<u8>().unwrap());
-            (
-                parts.next().unwrap(),
-                parts.next().unwrap(),
-                parts.next().unwrap(),
-                parts.next().unwrap(),
-            )
-        };
-        let port = parts.next().unwrap().parse().unwrap();
-
-        // Set sockopt (ReuseAddr, ReusePort) to newly-created socket
-        setsockopt(&socket, sockopt::ReuseAddr, &true).unwrap();
-        setsockopt(&socket, sockopt::ReusePort, &true).unwrap();
-
-        // Bind the socket
-        socket::bind(socket.as_raw_fd(), &SockaddrIn::new(octet1, octet2, octet3, octet4, port)).unwrap();
-
-        // Create std's UdpSocket from nix's socket
-        let socket = UdpSocket::from_std(std::net::UdpSocket::from(socket)).unwrap();
-
-        socket.connect(dst).await.unwrap();
-        tracing::debug!("connection is created for: {}", dst);
-
+        tracing::debug!("before sending rpc to: {}", stream.peer_addr().unwrap());
         let rpc = messaging::RPC {
             rpc_type: prc_type,
             request: bincode::serialize(&req).unwrap(),
         };
         let rpc = bincode::serialize(&rpc).unwrap();
 
-        socket.send(&rpc).await.map_err(|e| {
+        stream.write_all(&rpc).await.map_err(|e| {
             // If the error is a connection error, we return `Unreachable` so that connection isn't retried
             // immediately.
             if e.kind() == std::io::ErrorKind::ConnectionRefused {
@@ -98,16 +53,16 @@ impl Network {
             }
             openraft::error::RPCError::Network(NetworkError::new(&e))
         })?;
-        tracing::debug!("sent rpc to: {}", dst);
+        tracing::debug!("sent rpc to: {}", stream.peer_addr().unwrap());
 
         let mut buf = [0; 1024];
-        let n = socket.recv(&mut buf).await.map_err(|e| {
+        let n = stream.read(&mut buf).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::ConnectionRefused {
                 return openraft::error::RPCError::Unreachable(Unreachable::new(&e));
             }
             openraft::error::RPCError::Network(NetworkError::new(&e))
         })?;
-        tracing::debug!("received {} bytes, rpc from: {}", n, dst);
+        tracing::debug!("received {} bytes, rpc from: {}", n, stream.peer_addr().unwrap());
 
         let res: Result<Resp, Err> = bincode::deserialize(&buf[..n]).map_err(|e| openraft::error::RPCError::Network(NetworkError::new(&e)))?;
         res.map_err(|e| openraft::error::RPCError::RemoteError(RemoteError::new(target, e)))
@@ -120,10 +75,22 @@ impl RaftNetworkFactory<TypeConfig> for Network {
     type Network = NetworkConnection;
 
     async fn new_client(&mut self, target: NodeId, node: &BasicNode) -> Self::Network {
+        let addr = node.addr.clone();
+        let mut parts = addr.split(':');
+        let ip = parts.next().unwrap();
+        let port = parts.next().unwrap();
+
+        let port: u16 = port.parse().unwrap();
+        let port = port + 10;
+
+        let tcp_addr = format!("{}:{}", ip, port);
+        let stream = TcpStream::connect(tcp_addr.clone()).await.unwrap();
+        stream.set_nodelay(true).unwrap();
+        tracing::debug!("new client connection to: {}", stream.peer_addr().unwrap());
         NetworkConnection {
-            owner: Network { my_addr: self.my_addr.clone() },
+            owner: Network {},
             target,
-            target_node: node.clone(),
+            stream,
         }
     }
 }
@@ -131,7 +98,7 @@ impl RaftNetworkFactory<TypeConfig> for Network {
 pub struct NetworkConnection {
     owner: Network,
     target: NodeId,
-    target_node: BasicNode,
+    stream: TcpStream,
 }
 
 impl RaftNetwork<TypeConfig> for NetworkConnection {
@@ -140,7 +107,7 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
         req: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, typ::RPCError> {
-        self.owner.send_rpc(self.target, &self.target_node, RpcType::AppendEntries, req).await
+        self.owner.send_rpc(self.target, &mut self.stream, RpcType::AppendEntries, req).await
     }
 
     async fn install_snapshot(
@@ -148,7 +115,7 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
         req: InstallSnapshotRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<InstallSnapshotResponse<NodeId>, typ::RPCError<InstallSnapshotError>> {
-        self.owner.send_rpc(self.target, &self.target_node, RpcType::InstallSnapshot, req).await
+        self.owner.send_rpc(self.target, &mut self.stream, RpcType::InstallSnapshot, req).await
     }
 
     async fn vote(
@@ -156,6 +123,6 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
         req: VoteRequest<NodeId>,
         _option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, typ::RPCError> {
-        self.owner.send_rpc(self.target, &self.target_node, RpcType::Vote, req).await
+        self.owner.send_rpc(self.target, &mut self.stream, RpcType::Vote, req).await
     }
 }
