@@ -16,6 +16,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Write};
 use std::sync::Arc;
 
+use fs2::FileExt;
 use nix::sys::socket::{setsockopt, sockopt};
 
 use tokio::net::{TcpListener, TcpStream};
@@ -111,7 +112,7 @@ pub async fn start_raft_node(node_id: NodeId, http_addr: String) -> std::io::Res
     });
 
     let mut file = File::create("timestamp.log").unwrap();
-    let header = "id,msg_type,tsc\n";
+    let header = "id,msg_type,timing,tsc\n";
     file.write_all(header.as_bytes()).unwrap();
 
     // start_broker() と start_axtic_web_server() を並列に呼び出す
@@ -271,6 +272,7 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                 break;
             }
             Ok(Ok(n)) => {
+
                 // 受信したメッセージを Request 構造体にデシリアライズ
                 let req: Request = bincode::deserialize(&buf[..n]).unwrap();
 
@@ -281,7 +283,7 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                         let msg_id = req.id;
                         let msg_type = req.msg_type;
                         let tsc = unsafe { _rdtsc() };
-                        tsc_log.push_back((msg_id, msg_type, tsc));
+                        tsc_log.push_back((msg_id, msg_type, 1, tsc));
 
                         if client_id == 0 {
                             // クライアントIDを設定
@@ -291,6 +293,10 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                             Ok(res) => res.data,
                             Err(_) => Response::create_error_response(),
                         };
+                        let msg_id = res.id;
+                        let msg_type = res.msg_type;
+                        let tsc = unsafe { _rdtsc() };
+                        tsc_log.push_back((msg_id, msg_type, 2, tsc));
                         // resをシリアライズし，クライアントに送信
                         // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
                         // req を &[u8] に変換
@@ -305,6 +311,7 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                     }
                     MsgType::MSG_PUSH_ACK => {
                         if !app.state_machine_store.state_machine.read().await.data.is_empty(client_id) {
+                            let tsc = unsafe { _rdtsc() };
                             let req = Request::new(MsgType::MSG_PUSH_REQ, app.id.try_into().unwrap(), client_id, 0, String::default());
                             let res = match app.raft.client_write(req).await {
                                 // TODO: ブローカからの送信であるのに，Response を返している
@@ -312,9 +319,10 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                                 Err(_) => Response::create_error_response(),
                             };
                             let msg_id = res.id;
+                            tsc_log.push_back((msg_id, MsgType::MSG_PUSH_REQ, 4, tsc));
                             let msg_type = res.msg_type;
                             let tsc = unsafe { _rdtsc() };
-                            tsc_log.push_back((msg_id, msg_type, tsc));
+                            tsc_log.push_back((msg_id, msg_type, 5, tsc));
                             // resをシリアライズし，クライアントに送信
                             // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
                             // req を &[u8] に変換
@@ -344,6 +352,7 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                 // タイムアウト時の処理
                 // client_id に対応する MsgQueue が空でない場合，MSG_PUSH_REQ を送信
                 if !app.state_machine_store.state_machine.read().await.data.is_empty(client_id) {
+                    let tsc = unsafe { _rdtsc() };
                     let req = Request::new(MsgType::MSG_PUSH_REQ, app.id.try_into().unwrap(), client_id, 0, String::default());
                     let res = match app.raft.client_write(req).await {
                         // TODO: ブローカからの送信であるのに，Response を返している
@@ -351,9 +360,10 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
                         Err(_) => Response::create_error_response(),
                     };
                     let msg_id = res.id;
+                    tsc_log.push_back((msg_id, MsgType::MSG_PUSH_REQ, 4, tsc));
                     let msg_type = res.msg_type;
                     let tsc = unsafe { _rdtsc() };
-                    tsc_log.push_back((msg_id, msg_type, tsc));
+                    tsc_log.push_back((msg_id, msg_type, 5, tsc));
                     // resをシリアライズし，クライアントに送信
                     // TODO: Request 構造体のメソッドとして to_bytes() を実装すべきか．
                     // req を &[u8] に変換
@@ -366,9 +376,23 @@ pub async fn treat_client(mut stream: TcpStream, app: Data<App> ) {
             }
         }
     }
-    let mut file = OpenOptions::new().append(true).create(true).open("timestamp.log").unwrap();
-    tsc_log.iter().for_each(|(msg_id, msg_type, tsc)| {
-        let content = format!("{:?},{:?},{:?}\n", msg_id, msg_type, tsc);
-        file.write_all(content.as_bytes()).unwrap();
-    });
+
+    let retry_delay = Duration::from_millis(500); // リトライ間隔
+    loop {
+        match OpenOptions::new().append(true).create(true).open("timestamp.log") {
+            Ok(mut file) => {
+                // ロックを取得する
+                if file.lock_exclusive().is_ok() {
+                    tsc_log.iter().for_each(|(msg_id, msg_type, timing, tsc)| {
+                        let content = format!("{:?},{:?},{:?},{:?}\n", msg_id, msg_type, timing, tsc);
+                        file.write_all(content.as_bytes()).unwrap();
+                    });
+                    break;
+                }
+            }
+            Err(_) => {
+                tokio::time::sleep(retry_delay).await;
+            }
+        }
+    }
 }

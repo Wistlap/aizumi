@@ -1,7 +1,7 @@
-use std::{io::{Read, Write}, net::TcpStream};
-use std::time;
+use std::{arch::x86_64::_rdtsc, collections::VecDeque, fs::OpenOptions, io::{Read, Write}, net::TcpStream, time::Duration};
 
 pub use clap::Parser;
+use fs2::FileExt;
 use std::fmt::Display;
 
 use aizumi::messaging::{Request, Response, MsgType};
@@ -77,14 +77,18 @@ fn main() -> std::io::Result<()> {
     // println!("{:?}", res);
 
     let n = args.id + args.loop_times;
+    let mut tsc_log = VecDeque::new();
 
-    let start = time::Instant::now();
     for _i in args.id..n {
 
         // サーバからのリクエストを受信
         let _n = stream.read(&mut buffer)?;
         // 受信したメッセージを Response 構造体にデシリアライズ
-        let _msg: Response = bincode::deserialize(&buffer).unwrap();
+        let msg: Response = bincode::deserialize(&buffer).unwrap();
+        let msg_id = msg.id;
+        let msg_type = msg.msg_type;
+        let tsc = unsafe { _rdtsc() };
+        tsc_log.push_back((msg_id, msg_type, 6, tsc));
         // println!("{:?}", _msg);
 
         // Requestを作成
@@ -100,6 +104,11 @@ fn main() -> std::io::Result<()> {
         let mut formatted_req:[u8; 1024] = [0; 1024];
         formatted_req[..raw_req.len()].copy_from_slice(&raw_req);
 
+        // let msg_id = req.id;
+        // let msg_type = req.msg_type;
+        // let tsc = unsafe { _rdtsc() };
+        // tsc_log.push_back((msg_id, msg_type, 0, tsc));
+
         let res = stream.write(&formatted_req);
         if let Err(e) = res {
             eprintln!("Failed to send data: {}", e);
@@ -107,8 +116,24 @@ fn main() -> std::io::Result<()> {
         }
         stream.flush()?;
     }
-    let elapsed = start.elapsed();
-    println!("(receiver) Elapsed: {}.{:03} seconds", elapsed.as_secs(), elapsed.subsec_millis());
 
+    let retry_delay = Duration::from_millis(500); // リトライ間隔
+    loop {
+        match OpenOptions::new().append(true).create(true).open("timestamp.log") {
+            Ok(mut file) => {
+                // ロックを取得する
+                if file.lock_exclusive().is_ok() {
+                    tsc_log.iter().for_each(|(msg_id, msg_type, timing, tsc)| {
+                        let content = format!("{:?},{:?},{:?},{:?}\n", msg_id, msg_type, timing, tsc);
+                        file.write_all(content.as_bytes()).unwrap();
+                    });
+                    break;
+                }
+            }
+            Err(_) => {
+                std::thread::sleep(retry_delay);
+            }
+        }
+    }
     Ok(())
 }
