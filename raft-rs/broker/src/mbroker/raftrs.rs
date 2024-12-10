@@ -7,7 +7,7 @@
 use slog::Drain;
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::thread;
 
@@ -18,10 +18,12 @@ use raft::{prelude::*, StateRole};
 
 use slog::{error, info, o};
 
+use super::is_ready_to_send;
 use super::message::Message as MbMessage;
+use super::message::MessageType as MbMessageType;
 use super::queue::{MQueue, MQueuePool};
 
-pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>) {
+pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock<MQueuePool>>) {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain)
@@ -52,9 +54,10 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>) {
     for (i, rx) in rx_vec.into_iter().enumerate() {
         // A map[peer_id -> sender]. In the example we create 5 nodes, with ids in [1, 5].
         let mailboxes = (1..6u64).zip(tx_vec.iter().cloned()).collect();
+        let mq_pool = Arc::clone(&mq_pool);
         let node = match i {
             // Peer 1 is the leader.
-            0 => Node::create_raft_leader(1, rx, mailboxes, &logger),
+            0 => Node::create_raft_leader(1, rx, mailboxes, &logger, mq_pool),
             // Other peers are followers.
             _ => Node::create_raft_follower(rx, mailboxes),
         };
@@ -70,7 +73,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>) {
     // Propose some conf changes so that followers can be initialized.
     add_all_followers(proposals.as_ref());
 
-    info!(logger, "Propose conf changes success!\n\n");
+    // info!(logger, "Propose conf changes success!\n\n");
 
     // Send terminate signals
     // for _ in 0..NUM_NODES {
@@ -93,7 +96,6 @@ fn run_node(
     // Tick the raft node per 100ms. So use an `Instant` to trace it.
     let mut t = Instant::now();
     loop {
-        thread::sleep(Duration::from_millis(10));
         loop {
             // Step raft messages.
             match node.my_mailbox.try_recv() {
@@ -121,16 +123,13 @@ fn run_node(
             let mut proposals = proposals.lock().unwrap();
             for p in proposals.iter_mut().skip_while(|p| p.proposed > 0) {
                 propose(raft_group, p);
-                if let Some(ref msg) = p.normal {
-                println!("Propose a new proposal: {:?}", msg.header);
-                }
             }
         }
 
         // Handle readies from the raft.
         on_ready(
             raft_group,
-            &mut node.mq_pool,
+            Arc::clone(&node.mq_pool),
             &node.mailboxes,
             &proposals,
             &logger,
@@ -163,7 +162,7 @@ struct Node {
     mailboxes: HashMap<u64, Sender<Message>>,
     // Key-value pairs after applied. `MemStorage` only contains raft logs,
     // so we need an additional storage engine.
-    mq_pool: MQueuePool,
+    mq_pool: Arc<RwLock<MQueuePool>>,
 }
 
 impl Node {
@@ -173,6 +172,7 @@ impl Node {
         my_mailbox: Receiver<Message>,
         mailboxes: HashMap<u64, Sender<Message>>,
         logger: &slog::Logger,
+        mq_pool: Arc<RwLock<MQueuePool>>,
     ) -> Self {
         let mut cfg = example_config();
         cfg.id = id;
@@ -191,7 +191,7 @@ impl Node {
             raft_group,
             my_mailbox,
             mailboxes,
-            mq_pool: MQueuePool::new(),
+            mq_pool,
         }
     }
 
@@ -204,7 +204,7 @@ impl Node {
             raft_group: None,
             my_mailbox,
             mailboxes,
-            mq_pool: MQueuePool::new(),
+            mq_pool: Arc::new(RwLock::new(MQueuePool::new())),
         }
     }
 
@@ -236,7 +236,7 @@ impl Node {
 
 fn on_ready(
     raft_group: &mut RawNode<MemStorage>,
-    mq_pool: &mut MQueuePool,
+    mq_pool: Arc<RwLock<MQueuePool>>,
     mailboxes: &HashMap<u64, Sender<Message>>,
     proposals: &Mutex<VecDeque<Proposal>>,
     logger: &slog::Logger,
@@ -285,31 +285,92 @@ fn on_ready(
                     // From new elected leaders.
                     continue;
                 }
-                if let EntryType::EntryConfChange = entry.get_entry_type() {
+                let res = if let EntryType::EntryConfChange = entry.get_entry_type() {
                     // For conf change messages, make them effective.
                     let mut cc = ConfChange::default();
                     cc.merge_from_bytes(&entry.data).unwrap();
                     let cs = rn.apply_conf_change(&cc).unwrap();
                     store.wl().set_conf_state(cs);
+                    None
                 } else {
                     // For normal proposals, extract the key-value pair and then
                     // insert them into the kv engine.
                     let msg = MbMessage::from_bytes(&entry.data);
-                    let mqueue = match mq_pool.find_by_id(msg.header.daddr) {
-                        Some(mqueue) => Arc::clone(mqueue),
-                        None => {
-                            let client_id = msg.header.daddr;
-                            Arc::clone(mq_pool.add(client_id, MQueue::new(client_id)))
+
+                    let res = match msg.header.msg_type() {
+                        MbMessageType::SendReq => {
+                            let mut mq_pool = mq_pool.write().unwrap();
+                            let mqueue = match mq_pool.find_by_id(msg.header.daddr) {
+                                Some(mqueue) => Arc::clone(mqueue),
+                                None => {
+                                    let client_id = msg.header.daddr;
+                                    Arc::clone(mq_pool.add(client_id, MQueue::new(client_id)))
+                                }
+                            };
+                            drop(mq_pool);
+                            // info!(logger, "peer {}: process SendReq: {:?}", rn.raft.id, msg.header.id);
+                            mqueue.write().unwrap().waiting_queue.enqueue(msg);
+                            None
+                        }
+                        MbMessageType::FreeReq => {
+                            let msg_id = msg.header.id;
+                            let saddr = msg.header.saddr;
+                            let mqueue = {
+                                let mq_pool = mq_pool.read().unwrap();
+                                mq_pool.find_by_id(saddr).unwrap().clone()
+                            };
+                            mqueue
+                                .write()
+                                .unwrap()
+                                .delivered_queue
+                                .dequeue_by(|queued_msg| queued_msg.header.id == msg_id)
+                                .unwrap();
+                            // info!(logger, "peer {}: process FreeReq: {:?}", rn.raft.id, msg_id);
+                            None
+                        }
+                        MbMessageType::PushReq => {
+                            let saddr = msg.header.saddr;
+                            let mqueue = {
+                                let mq_pool = mq_pool.read().unwrap();
+                                mq_pool.find_by_id(saddr).unwrap().clone()
+                            };
+                            let mut mqueue = mqueue.write().unwrap();
+                            let res = if is_ready_to_send(&mqueue) {
+                                let mut msg = mqueue.waiting_queue.dequeue().unwrap();
+                                msg.header.change_msg_type(MbMessageType::PushReq);
+                                // timer.append(msg.header.id, msg.header.msg_type(), time_now());
+                                // stream.send_msg(&mut msg).unwrap();
+                                mqueue.delivered_queue.enqueue(msg.clone());
+                                //info!(logger, "peer {}: process inner PushReq or Timeout: {:?}", rn.raft.id, msg.header.id);
+                                Some(msg)
+                            } else {
+                                None
+                            };
+                            res
+                        }
+                        MbMessageType::HeloReq => {
+                            let client_id = msg.header.saddr;
+                            {
+                                let mut mq_pool = mq_pool.write().unwrap();
+                                if mq_pool.find_by_id(client_id).is_none() {
+                                    mq_pool.add(client_id, MQueue::new(client_id));
+                                };
+                            }
+                            //info!(logger, "peer {}: process HeloReq: {:?}", rn.raft.id, msg.header.id);
+                            None
+                        }
+                        _ => {
+                            // The other MessageType will never be received
+                            None
                         }
                     };
-                    mqueue.write().unwrap().waiting_queue.enqueue(msg);
-                    info!(logger, "peer {}: Num of messages in mqueue (in Raft consensus): {:?}", rn.raft.id, mqueue.write().unwrap().waiting_queue.len());
-                }
+                    res
+                };
                 if rn.raft.state == StateRole::Leader {
                     // The leader should response to the clients, tell them if their proposals
                     // succeeded or not.
                     let proposal = proposals.lock().unwrap().pop_front().unwrap();
-                    proposal.propose_success.send(true).unwrap();
+                    proposal.propose_success.send(res).unwrap();
                 }
             }
         };
@@ -373,11 +434,11 @@ pub struct Proposal {
     transfer_leader: Option<u64>,
     // If it's proposed, it will be set to the index of the entry.
     proposed: u64,
-    propose_success: SyncSender<bool>,
+    propose_success: SyncSender<Option<MbMessage>>,
 }
 
 impl Proposal {
-    fn conf_change(cc: &ConfChange) -> (Self, Receiver<bool>) {
+    fn conf_change(cc: &ConfChange) -> (Self, Receiver<Option<MbMessage>>) {
         let (tx, rx) = mpsc::sync_channel(1);
         let proposal = Proposal {
             normal: None,
@@ -389,7 +450,7 @@ impl Proposal {
         (proposal, rx)
     }
 
-    pub fn normal(msg:MbMessage) -> (Self, Receiver<bool>) {
+    pub fn normal(msg:MbMessage) -> (Self, Receiver<Option<MbMessage>>) {
         let (tx, rx) = mpsc::sync_channel(1);
         let proposal = Proposal {
             normal: Some(msg),
@@ -420,7 +481,8 @@ fn propose(raft_group: &mut RawNode<MemStorage>, proposal: &mut Proposal) {
     let last_index2 = raft_group.raft.raft_log.last_index() + 1;
     if last_index2 == last_index1 {
         // Propose failed, don't forget to respond to the client.
-        proposal.propose_success.send(false).unwrap();
+        proposal.propose_success.send(None).unwrap();
+        // proposal.propose_success.send(false).unwrap();
     } else {
         proposal.proposed = last_index1;
     }
@@ -435,7 +497,8 @@ fn add_all_followers(proposals: &Mutex<VecDeque<Proposal>>) {
         loop {
             let (proposal, rx) = Proposal::conf_change(&conf_change);
             proposals.lock().unwrap().push_back(proposal);
-            if rx.recv().unwrap() {
+            // TODO: is_none()でいいのか
+            if rx.recv().unwrap().is_none() {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
