@@ -7,7 +7,7 @@
 use slog::Drain;
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::thread;
 
@@ -18,7 +18,9 @@ use raft::{prelude::*, StateRole};
 
 use slog::{error, info, o};
 
+use super::{into_ack, is_ready_to_send};
 use super::message::Message as MbMessage;
+use super::message::MessageType as MbMessageType;
 use super::queue::{MQueue, MQueuePool};
 
 pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>) {
@@ -70,7 +72,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>) {
     // Propose some conf changes so that followers can be initialized.
     add_all_followers(proposals.as_ref());
 
-    info!(logger, "Propose conf changes success!\n\n");
+    //info!(logger, "Propose conf changes success!\n\n");
 
     // Send terminate signals
     // for _ in 0..NUM_NODES {
@@ -130,7 +132,7 @@ fn run_node(
         // Handle readies from the raft.
         on_ready(
             raft_group,
-            &mut node.mq_pool,
+            Arc::clone(&node.mq_pool),
             &node.mailboxes,
             &proposals,
             &logger,
@@ -163,7 +165,7 @@ struct Node {
     mailboxes: HashMap<u64, Sender<Message>>,
     // Key-value pairs after applied. `MemStorage` only contains raft logs,
     // so we need an additional storage engine.
-    mq_pool: MQueuePool,
+    mq_pool: Arc<RwLock<MQueuePool>>,
 }
 
 impl Node {
@@ -191,7 +193,7 @@ impl Node {
             raft_group,
             my_mailbox,
             mailboxes,
-            mq_pool: MQueuePool::new(),
+            mq_pool: Arc::new(RwLock::new(MQueuePool::new())),
         }
     }
 
@@ -204,7 +206,7 @@ impl Node {
             raft_group: None,
             my_mailbox,
             mailboxes,
-            mq_pool: MQueuePool::new(),
+            mq_pool: Arc::new(RwLock::new(MQueuePool::new())),
         }
     }
 
@@ -236,7 +238,7 @@ impl Node {
 
 fn on_ready(
     raft_group: &mut RawNode<MemStorage>,
-    mq_pool: &mut MQueuePool,
+    mq_pool: Arc<RwLock<MQueuePool>>,
     mailboxes: &HashMap<u64, Sender<Message>>,
     proposals: &Mutex<VecDeque<Proposal>>,
     logger: &slog::Logger,
@@ -296,18 +298,94 @@ fn on_ready(
                     // For normal proposals, extract the key-value pair and then
                     // insert them into the kv engine.
                     let msg = MbMessage::from_bytes(&entry.data);
-                    
-                    let mqueue = match mq_pool.find_by_id(msg.header.daddr) {
-                        Some(mqueue) => Arc::clone(mqueue),
-                        None => {
-                            let client_id = msg.header.daddr;
-                            Arc::clone(mq_pool.add(client_id, MQueue::new(client_id)))
+
+                    let res = match msg.header.msg_type() {
+                        MbMessageType::SendReq => {
+                            let mut mq_pool = mq_pool.write().unwrap();
+                            let mqueue = match mq_pool.find_by_id(msg.header.daddr) {
+                                Some(mqueue) => Arc::clone(mqueue),
+                                None => {
+                                    let client_id = msg.header.daddr;
+                                    Arc::clone(mq_pool.add(client_id, MQueue::new(client_id)))
+                                }
+                            };
+                            drop(mq_pool);
+                            //info!(logger, "peer {}: process SendReq: {:?}", rn.raft.id, msg.header.id);
+                            mqueue.write().unwrap().waiting_queue.enqueue(msg);
+                            None
+                        }
+                        MbMessageType::FreeReq => {
+                            let msg_id = msg.header.id;
+                            let saddr = msg.header.saddr;
+                            let mqueue = {
+                                let mq_pool = mq_pool.read().unwrap();
+                                mq_pool.find_by_id(saddr).unwrap().clone()
+                            };
+                            let res = mqueue
+                                .write()
+                                .unwrap()
+                                .delivered_queue
+                                .dequeue_by(|queued_msg| queued_msg.header.id == msg_id)
+                                .unwrap();
+                            //info!(logger, "peer {}: process FreeReq: {:?}", rn.raft.id, msg_id);
+                            Some(res)
+                        }
+                        MbMessageType::PushReq => {
+                            // let msg_id = msg.header.id;
+                            let saddr = msg.header.saddr;
+                            let mqueue = {
+                                let mq_pool = mq_pool.read().unwrap();
+                                mq_pool.find_by_id(saddr).unwrap().clone()
+                            };
+                            let mut mqueue = mqueue.write().unwrap();
+                            let res = if is_ready_to_send(&mqueue) {
+                                let mut msg = mqueue.waiting_queue.dequeue().unwrap();
+                                msg.header.change_msg_type(MbMessageType::PushReq);
+                                // timer.append(msg.header.id, msg.header.msg_type(), time_now());
+                                // stream.send_msg(&mut msg).unwrap();
+                                mqueue.delivered_queue.enqueue(msg.clone());
+                                //info!(logger, "peer {}: process inner PushReq or Timeout: {:?}", rn.raft.id, msg.header.id);
+                                Some(msg)
+                            } else {
+                                None
+                            };
+                            res
+                        }
+                        MbMessageType::PushAck => {
+                            // do nothing
+                            None
+                        }
+                        MbMessageType::HeloReq => {
+                            let client_id = msg.header.saddr;
+                            {
+                                let mut mq_pool = mq_pool.write().unwrap();
+                                if mq_pool.find_by_id(client_id).is_none() {
+                                    mq_pool.add(client_id, MQueue::new(client_id));
+                                };
+                            }
+                            // let mut ack = into_normal_ack(msg, myid);
+                            // stream.send_msg(&mut ack).unwrap();
+                            //info!(logger, "peer {}: process HeloReq: {:?}", rn.raft.id, msg.header.id);
+                            None
+                        }
+                        MbMessageType::StatReq => {
+                            let queue_stat = {
+                                let mq_pool = mq_pool.read().unwrap();
+                                mq_pool.status()
+                            };
+                            // let mut ack = into_ack(msg, myid, queue_stat);
+                            // TODO: myid 決め打ち
+                            //info!(logger, "peer {}: process StatReq: {:?}", rn.raft.id, msg.header.id);
+                            let ack = into_ack(msg, 0, queue_stat);
+                            Some(ack)
+                            // stream.send_msg(&mut ack).unwrap();
+                        }
+                        _ => {
+                            // The other MessageType will never be received
+                            None
                         }
                     };
-                    mqueue.write().unwrap().waiting_queue.enqueue(msg);
-                    info!(logger, "peer {}: Num of messages in mqueue (in Raft consensus): {:?}", rn.raft.id, mqueue.write().unwrap().waiting_queue.len());
-                    let msg = mqueue.write().unwrap().waiting_queue.dequeue();
-                    msg
+                    res
                 };
                 if rn.raft.state == StateRole::Leader {
                     // The leader should response to the clients, tell them if their proposals
