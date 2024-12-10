@@ -197,7 +197,11 @@ fn treat_client(
                         proposals.lock().unwrap().push_back(proposal);
                         // After we got a response from `rx`, we can assume the put succeeded and following
                         // `get` operations can find the key-value pair.
-                        rx.recv().unwrap();
+                        let res = match rx.recv().unwrap() {
+                            Some(msg) => msg,
+                            None => Message::new(MessageHeader::new(MessageType::RecvReq, 0 as c_uint, 0 as c_uint, 0 as c_uint)),
+                        };
+                        println!("consensus result: {:?}", res.header);
 
                         mqueue.write().unwrap().waiting_queue.enqueue(msg);
                         stream.send_msg(&mut ack).unwrap();

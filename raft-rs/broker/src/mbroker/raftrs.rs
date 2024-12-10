@@ -122,7 +122,7 @@ fn run_node(
             for p in proposals.iter_mut().skip_while(|p| p.proposed > 0) {
                 propose(raft_group, p);
                 if let Some(ref msg) = p.normal {
-                println!("Propose a new proposal: {:?}", msg.header);
+                // println!("Propose a new proposal: {:?}", msg.header);
                 }
             }
         }
@@ -285,16 +285,18 @@ fn on_ready(
                     // From new elected leaders.
                     continue;
                 }
-                if let EntryType::EntryConfChange = entry.get_entry_type() {
+                let res = if let EntryType::EntryConfChange = entry.get_entry_type() {
                     // For conf change messages, make them effective.
                     let mut cc = ConfChange::default();
                     cc.merge_from_bytes(&entry.data).unwrap();
                     let cs = rn.apply_conf_change(&cc).unwrap();
                     store.wl().set_conf_state(cs);
+                    None
                 } else {
                     // For normal proposals, extract the key-value pair and then
                     // insert them into the kv engine.
                     let msg = MbMessage::from_bytes(&entry.data);
+                    
                     let mqueue = match mq_pool.find_by_id(msg.header.daddr) {
                         Some(mqueue) => Arc::clone(mqueue),
                         None => {
@@ -304,12 +306,14 @@ fn on_ready(
                     };
                     mqueue.write().unwrap().waiting_queue.enqueue(msg);
                     info!(logger, "peer {}: Num of messages in mqueue (in Raft consensus): {:?}", rn.raft.id, mqueue.write().unwrap().waiting_queue.len());
-                }
+                    let msg = mqueue.write().unwrap().waiting_queue.dequeue();
+                    msg
+                };
                 if rn.raft.state == StateRole::Leader {
                     // The leader should response to the clients, tell them if their proposals
                     // succeeded or not.
                     let proposal = proposals.lock().unwrap().pop_front().unwrap();
-                    proposal.propose_success.send(true).unwrap();
+                    proposal.propose_success.send(res).unwrap();
                 }
             }
         };
@@ -373,11 +377,11 @@ pub struct Proposal {
     transfer_leader: Option<u64>,
     // If it's proposed, it will be set to the index of the entry.
     proposed: u64,
-    propose_success: SyncSender<bool>,
+    propose_success: SyncSender<Option<MbMessage>>,
 }
 
 impl Proposal {
-    fn conf_change(cc: &ConfChange) -> (Self, Receiver<bool>) {
+    fn conf_change(cc: &ConfChange) -> (Self, Receiver<Option<MbMessage>>) {
         let (tx, rx) = mpsc::sync_channel(1);
         let proposal = Proposal {
             normal: None,
@@ -389,7 +393,7 @@ impl Proposal {
         (proposal, rx)
     }
 
-    pub fn normal(msg:MbMessage) -> (Self, Receiver<bool>) {
+    pub fn normal(msg:MbMessage) -> (Self, Receiver<Option<MbMessage>>) {
         let (tx, rx) = mpsc::sync_channel(1);
         let proposal = Proposal {
             normal: Some(msg),
@@ -420,7 +424,9 @@ fn propose(raft_group: &mut RawNode<MemStorage>, proposal: &mut Proposal) {
     let last_index2 = raft_group.raft.raft_log.last_index() + 1;
     if last_index2 == last_index1 {
         // Propose failed, don't forget to respond to the client.
-        proposal.propose_success.send(false).unwrap();
+        // TODO: falseを返すべきか
+        proposal.propose_success.send(None).unwrap();
+        // proposal.propose_success.send(false).unwrap();
     } else {
         proposal.proposed = last_index1;
     }
@@ -435,7 +441,8 @@ fn add_all_followers(proposals: &Mutex<VecDeque<Proposal>>) {
         loop {
             let (proposal, rx) = Proposal::conf_change(&conf_change);
             proposals.lock().unwrap().push_back(proposal);
-            if rx.recv().unwrap() {
+            // TODO: is_none()でいいのか
+            if rx.recv().unwrap().is_none() {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
