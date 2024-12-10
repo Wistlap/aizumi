@@ -191,6 +191,7 @@ case $RUNTIME in
                echo $! >> $RUNTIME_PID_FILE
                sleep 1 ;;
 esac
+sleep 3
 
 ################
 # invoke receivers

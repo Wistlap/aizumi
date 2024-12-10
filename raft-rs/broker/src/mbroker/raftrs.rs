@@ -72,7 +72,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>) {
     // Propose some conf changes so that followers can be initialized.
     add_all_followers(proposals.as_ref());
 
-    //info!(logger, "Propose conf changes success!\n\n");
+    info!(logger, "Propose conf changes success!\n\n");
 
     // Send terminate signals
     // for _ in 0..NUM_NODES {
@@ -321,14 +321,14 @@ fn on_ready(
                                 let mq_pool = mq_pool.read().unwrap();
                                 mq_pool.find_by_id(saddr).unwrap().clone()
                             };
-                            let res = mqueue
+                            mqueue
                                 .write()
                                 .unwrap()
                                 .delivered_queue
                                 .dequeue_by(|queued_msg| queued_msg.header.id == msg_id)
                                 .unwrap();
                             //info!(logger, "peer {}: process FreeReq: {:?}", rn.raft.id, msg_id);
-                            Some(res)
+                            None
                         }
                         MbMessageType::PushReq => {
                             // let msg_id = msg.header.id;

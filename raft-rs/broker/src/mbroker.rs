@@ -233,9 +233,9 @@ fn treat_client(
                         //     .delivered_queue
                         //     .dequeue_by(|queued_msg| queued_msg.header.id == msg_id)
                         //     .unwrap();
-                        stream.send_msg(&mut into_normal_ack(res, myid)).unwrap();
-
                         let mut msg_c = msg.clone();
+                        stream.send_msg(&mut into_normal_ack(msg, myid)).unwrap();
+
                         msg_c.header.change_msg_type(MessageType::PushReq);
                         let (proposal, rx) = Proposal::normal(msg_c.clone());
                         proposals.lock().unwrap().push_back(proposal);
