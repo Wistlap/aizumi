@@ -6,6 +6,7 @@
 
 use slog::Drain;
 use std::collections::{HashMap, VecDeque};
+use std::ffi::NulError;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -33,7 +34,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
         .fuse();
     let logger = slog::Logger::root(drain, o!());
 
-    const NUM_NODES: u32 = 5;
+    const NUM_NODES: u64 = 5;
     // Create 5 mailboxes to send/receive messages. Every node holds a `Receiver` to receive
     // messages from others, and uses the respective `Sender` to send messages to others.
     let (mut tx_vec, mut rx_vec) = (Vec::new(), Vec::new());
@@ -53,7 +54,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     let mut handles = Vec::new();
     for (i, rx) in rx_vec.into_iter().enumerate() {
         // A map[peer_id -> sender]. In the example we create 5 nodes, with ids in [1, 5].
-        let mailboxes = (1..6u64).zip(tx_vec.iter().cloned()).collect();
+        let mailboxes = (1..NUM_NODES+1).zip(tx_vec.iter().cloned()).collect();
         let mq_pool = Arc::clone(&mq_pool);
         let node = match i {
             // Peer 1 is the leader.
@@ -71,7 +72,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     }
 
     // Propose some conf changes so that followers can be initialized.
-    add_all_followers(proposals.as_ref());
+    add_all_followers(proposals.as_ref(), NUM_NODES);
 
     // info!(logger, "Propose conf changes success!\n\n");
 
@@ -489,8 +490,8 @@ fn propose(raft_group: &mut RawNode<MemStorage>, proposal: &mut Proposal) {
 }
 
 // Proposes some conf change for peers [2, 5].
-fn add_all_followers(proposals: &Mutex<VecDeque<Proposal>>) {
-    for i in 2..6u64 {
+fn add_all_followers(proposals: &Mutex<VecDeque<Proposal>>, num_nodes: u64) {
+    for i in 2..num_nodes+1 {
         let mut conf_change = ConfChange::default();
         conf_change.node_id = i;
         conf_change.set_change_type(ConfChangeType::AddNode);
