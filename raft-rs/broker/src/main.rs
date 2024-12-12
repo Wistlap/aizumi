@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.log_file,
         args.log_level,
         args.pid_file,
+        args.raft_nodes,
     )?
     .run().unwrap();
 

@@ -48,6 +48,11 @@ pub struct Args {
     /// This must be unique toward other senders and receivers
     #[arg(short = 'u', long, default_value_t = 0)]
     pub myid: u32,
+
+    /// Number of Raft group nodes
+    ///
+    #[arg(short = 'g', long, default_value_t = 5)]
+    pub raft_nodes: u32,
 }
 
 impl Display for Args {
@@ -60,6 +65,7 @@ impl Display for Args {
         let output = format!("{output}log-file: {}\n", self.log_file);
         let output = format!("{output}pid-file: {}\n", self.pid_file);
         let output = format!("{output}myid: {}\n", self.myid);
+        let output = format!("{output}raft-nodes: {}\n", self.raft_nodes);
 
         f.write_str(output.as_str())
     }

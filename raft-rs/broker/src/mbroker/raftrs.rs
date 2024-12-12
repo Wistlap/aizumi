@@ -24,7 +24,7 @@ use super::message::Message as MbMessage;
 use super::message::MessageType as MbMessageType;
 use super::queue::{MQueue, MQueuePool};
 
-pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock<MQueuePool>>) {
+pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock<MQueuePool>>, raft_nodes: u32) {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain)
@@ -34,11 +34,11 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
         .fuse();
     let logger = slog::Logger::root(drain, o!());
 
-    const NUM_NODES: u64 = 5;
+    let num_nodes: u64 = raft_nodes as u64;
     // Create 5 mailboxes to send/receive messages. Every node holds a `Receiver` to receive
     // messages from others, and uses the respective `Sender` to send messages to others.
     let (mut tx_vec, mut rx_vec) = (Vec::new(), Vec::new());
-    for _ in 0..NUM_NODES {
+    for _ in 0..num_nodes {
         let (tx, rx) = mpsc::channel();
         tx_vec.push(tx);
         rx_vec.push(rx);
@@ -54,7 +54,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     let mut handles = Vec::new();
     for (i, rx) in rx_vec.into_iter().enumerate() {
         // A map[peer_id -> sender]. In the example we create 5 nodes, with ids in [1, 5].
-        let mailboxes = (1..NUM_NODES+1).zip(tx_vec.iter().cloned()).collect();
+        let mailboxes = (1..num_nodes+1).zip(tx_vec.iter().cloned()).collect();
         let mq_pool = Arc::clone(&mq_pool);
         let node = match i {
             // Peer 1 is the leader.
@@ -72,12 +72,12 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     }
 
     // Propose some conf changes so that followers can be initialized.
-    add_all_followers(proposals.as_ref(), NUM_NODES);
+    add_all_followers(proposals.as_ref(), num_nodes);
 
     // info!(logger, "Propose conf changes success!\n\n");
 
     // Send terminate signals
-    // for _ in 0..NUM_NODES {
+    // for _ in 0..num_nodes {
     //     tx_stop.send(Signal::Terminate).unwrap();
     // }
 
