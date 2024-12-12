@@ -171,7 +171,7 @@ fn treat_client(
     proposals: Arc<Mutex<VecDeque<Proposal>>>,
 ) {
     let mut client_id = 0;
-    let mut counter = 0;
+    let mut _counter = 0;
     let mut timer = TimerStorage::new();
     let epoll = Epoll::new(EpollCreateFlags::empty()).unwrap();
     let event = EpollEvent::new(EpollFlags::EPOLLIN, stream.as_raw_fd().try_into().unwrap());
@@ -193,7 +193,7 @@ fn treat_client(
                         rx.recv().unwrap();
                         // println!("consensus result(SendReq): {:?}", res.header);
                         stream.send_msg(&mut ack).unwrap();
-                        counter += 1;
+                        _counter += 1;
                     }
                     MessageType::RecvReq => {
                         // do nothing
@@ -266,7 +266,7 @@ fn treat_client(
                 stream.send_msg(&mut res).unwrap();
                 }
             }
-            counter += 1;
+            _counter += 1;
         }
     }
     timer.dump(log_target.lock().unwrap().deref_mut());

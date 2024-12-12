@@ -6,7 +6,7 @@
 
 use slog::Drain;
 use std::collections::{HashMap, VecDeque};
-use std::ffi::NulError;
+// use std::ffi::NulError;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use raft::storage::MemStorage;
 use raft::{prelude::*, StateRole};
 // use regex::Regex;
 
-use slog::{error, info, o};
+use slog::{error, o};
 
 use super::is_ready_to_send;
 use super::message::Message as MbMessage;
@@ -143,6 +143,7 @@ fn run_node(
     }
 }
 
+#[allow(dead_code)]
 enum Signal {
     Terminate,
 }
@@ -152,7 +153,7 @@ fn check_signals(receiver: &Arc<Mutex<mpsc::Receiver<Signal>>>) -> bool {
         Ok(Signal::Terminate) => true,
         Err(TryRecvError::Empty) => false,
         Err(TryRecvError::Disconnected) => true,
-        _ => false,
+        // _ => false,
     }
 }
 
@@ -279,7 +280,7 @@ fn on_ready(
         }
     }
 
-    let mut handle_committed_entries =
+    let handle_committed_entries =
         |rn: &mut RawNode<MemStorage>, committed_entries: Vec<Entry>| {
             for entry in committed_entries {
                 if entry.data.is_empty() {
