@@ -221,12 +221,13 @@ done
 ################
 # make graph
 
+while is_receiver_working
+do
+  sleep 1
+done
+sleep 4
+
 if "${OPT_LOG_FLAG}"; then
-  while is_receiver_working
-  do
-    sleep 1
-  done
-  sleep 4
 
   kill -s SIGINT $MPSTAT_PID
 
