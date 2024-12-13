@@ -13,7 +13,7 @@ $(SUBDIRS):
 #
 test:
 	- killall rast-rs-broker
-	scripts/autotest_all.sh -b broker/target/release/raft-rs-broker -r 0,10,20 -s 1,10,20 -c 100000 -d 3 -l "log/$$(date +%Y%m%d-%H%M%S)/raft-rs-broker-%s-%r-%t-%c-%g-$$(date +%Y%m%d-%H%M%S).log" -- -t 1 -g 5
+	scripts/autotest_all.sh -b broker/target/release/raft-rs-broker -r 1,10,20 -s 1,10,20 -c 100000 -d 3 -l "log/$$(date +%Y%m%d-%H%M%S)/raft-rs-broker-%s-%r-%t-%c-%g-$$(date +%Y%m%d-%H%M%S).log" -- -t 1 -g 5
 
 # sender, receiver : 10,10, raft nodes: 1,2,..,10
 raft-test10:
