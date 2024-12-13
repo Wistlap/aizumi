@@ -17,22 +17,23 @@ sleep 1
 
 # sender-receiver: 1-1, raft nodes: 1-10
 killall rast-rs-broker
-./autotest_all.sh -b ../broker/target/release/raft-rs-broker -r 1 -s 1 -c 100000 -d 3 -l "../log/1_clients_n_nodes/raft-rs-broker-%s-%r-%t-%c-%g-$$(date +%Y%m%d-%H%M%S).log" -- -t 1 -g 1-10
+./autotest_all.sh -b ../broker/target/release/raft-rs-broker -r 1 -s 1 -c 100000 -d 3 -l "../log/1_clients_n_nodes/raft-rs-broker-%s-%r-%t-%c-%g-$(date +%Y%m%d-%H%M%S).log" -- -t 1 -g 1-10
 echo
 sleep 1
 
 # sender-receiver: 10-10, raft nodes: 1-10
 killall rast-rs-broker
-./autotest_all.sh -b ../broker/target/release/raft-rs-broker -r 10 -s 10 -c 100000 -d 3 -l "../log/10_clients_n_nodes/raft-rs-broker-%s-%r-%t-%c-%g-$$(date +%Y%m%d-%H%M%S).log" -- -t 1 -g 1-10
+./autotest_all.sh -b ../broker/target/release/raft-rs-broker -r 10 -s 10 -c 100000 -d 3 -l "../log/10_clients_n_nodes/raft-rs-broker-%s-%r-%t-%c-%g-$(date +%Y%m%d-%H%M%S).log" -- -t 1 -g 1-10
 echo
 sleep 1
 
 # make stat files
 for log in ../log/*
 do
-  if [ ! -f $$log/*.stat ]; then
+  echo $log
+  if [ ! -f "$log/*.stat" ]; then
     # echo ./csv2stat_all.sh $log
-    ./csv2stat_all.sh $$log
+    ./csv2stat_all.sh $log
   fi
 done
 echo
@@ -41,7 +42,12 @@ sleep 1
 # make graph
 echo "make graph from stat files in n_clients_5_nodes directory"
 ./stat2graph.py ../log/n_clients_5_nodes -tb
-mv *.pdf n_clients_5_nodes.pdf
+for file in *.pdf; do
+  if [ "$file" ]; then
+    mv "$file" "n_clients_5_nodes.pdf"
+    break
+  fi
+done
 echo
 sleep 1
 
