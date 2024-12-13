@@ -46,34 +46,34 @@ def bar_plot(df, df_c, file):
 def main(dirs, n, t, scatter, bar):
   log_dirs = dirs
   paths = list(flatten(glob.glob(f'{log_dir}/*.log.stat') for log_dir in log_dirs))
-  reg = re.compile('.(?P<broker>[a-zA-Z][-a-zA-Z]*)-(?P<sender>[0-9]+)-(?P<receiver>[0-9]+)-(?P<option>[0-9]+)-(?P<message>[0-9]+)-(?P<date>[0-9]+-[0-9]+).log.stat$')
+  reg = re.compile('.(?P<broker>[a-zA-Z][-a-zA-Z]*)-(?P<sender>[0-9]+)-(?P<receiver>[0-9]+)-(?P<option1>[0-9]+)-(?P<message>[0-9]+)-(?P<option2>[0-9]+)-(?P<date>[0-9]+-[0-9]+).log.stat$')
   table = []
   if n:
     legend = 'thread:broker'
   elif t:
-    legend = 'timeout:broker'
+    # legend = 'timeout:broker'
+    legend = 'sender-receiver'
   else:
     legend = ''
-  dataframe_column = ['sender-receiver', legend, 'throughput(msg/sec)']
+  dataframe_column = ['raft nodes', legend, 'throughput(msg/sec)']
 
-  i = 1
   # 各ログディレクトリ内の .log.stat ファイルからスループットを計算しリストに保存
   for path in paths:
     match = reg.search(path)
     broker = match.group('broker')
     sender_num = int(match.group('sender'))
     receiver_num = int(match.group('receiver'))
-    broker_opt_num = int(match.group('option'))
+    broker_opt1_num = int(match.group('option1'))
+    broker_opt2_num = int(match.group('option2'))
     message_num = int(match.group('message'))
     with open(path, 'r') as f:
       reader = csv.reader(f)
       lines = list(reader)
       time = float(lines[1][2])
       throughput = message_num/time
-      table.append([i, broker_opt_num, broker, throughput])
-    i = i + 1
+      table.append([broker_opt2_num, (sender_num, receiver_num), broker, throughput])
   table.sort()
-  table = [[i, f'{broker_opt}:{broker}', throughput] for i, broker_opt, broker, throughput in table]
+  table = [[broker_opt2, f'{sender}-{receiver}', throughput] for broker_opt2, (sender, receiver), broker, throughput in table]
   # print(table)
 
 

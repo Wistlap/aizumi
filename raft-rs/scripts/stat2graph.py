@@ -46,12 +46,13 @@ def bar_plot(df, df_c, file):
 def main(dirs, n, t, scatter, bar):
   log_dirs = dirs
   paths = list(flatten(glob.glob(f'{log_dir}/*.log.stat') for log_dir in log_dirs))
-  reg = re.compile('.(?P<broker>[a-zA-Z][-a-zA-Z]*)-(?P<sender>[0-9]+)-(?P<receiver>[0-9]+)-(?P<option>[0-9]+)-(?P<message>[0-9]+)-(?P<date>[0-9]+-[0-9]+).log.stat$')
+  reg = re.compile('.(?P<broker>[a-zA-Z][-a-zA-Z]*)-(?P<sender>[0-9]+)-(?P<receiver>[0-9]+)-(?P<option1>[0-9]+)-(?P<message>[0-9]+)-(?P<option2>[0-9]+)-(?P<date>[0-9]+-[0-9]+).log.stat$')
   table = []
   if n:
     legend = 'thread:broker'
   elif t:
-    legend = 'timeout:broker'
+    # legend = 'timeout:broker'
+    legend = 'raft nodes'
   else:
     legend = ''
   dataframe_column = ['sender-receiver', legend, 'throughput(msg/sec)']
@@ -62,16 +63,19 @@ def main(dirs, n, t, scatter, bar):
     broker = match.group('broker')
     sender_num = int(match.group('sender'))
     receiver_num = int(match.group('receiver'))
-    broker_opt_num = int(match.group('option'))
+    broker_opt1_num = int(match.group('option1'))
+    broker_opt2_num = int(match.group('option2'))
     message_num = int(match.group('message'))
     with open(path, 'r') as f:
       reader = csv.reader(f)
       lines = list(reader)
       time = float(lines[1][2])
       throughput = message_num/time
-      table.append([(sender_num, receiver_num), broker_opt_num, broker, throughput])
+      # table.append([(sender_num, receiver_num), broker_opt1_num, broker, throughput])
+      table.append([(sender_num, receiver_num), broker_opt2_num, throughput])
   table.sort()
-  table = [[f'{sender}-{receiver}', f'{broker_opt}:{broker}', throughput] for (sender, receiver), broker_opt, broker, throughput in table]
+  # table = [[f'{sender}-{receiver}', f'{broker_opt}:{broker}', throughput] for (sender, receiver), broker_opt, broker, throughput in table]
+  table = [[f'{sender}-{receiver}', f'{broker_opt}', throughput] for (sender, receiver), broker_opt, throughput in table]
   # print(table)
 
   # データフレームの作成
