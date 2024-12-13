@@ -14,6 +14,7 @@
 | csv2stat\_all.sh | autotest\_all.sh が出力するログディレクトリ内の全てのログファイルに stat\_frpm\_csv.py を実行するスクリプト |
 | stat2graph | stat\_from\_csv.py で出力した stat ファイルを含むログディレクトリからデータを整形しグラフを出力するスクリプト |
 | stat2scrapbox | sta\t_from\_csv.py で出力した stat ファイルを含むログディレクトリからデータを整形し Scrapbox のテーブル記法で出力するスクリプト |
+| raft_test.sh | Raft 実装のブローカに関する一連のテストとグラフ生成を実行するスクリプト|
 
 ## コマンド書式
 
@@ -297,6 +298,22 @@ stat\_from\_csv.py が出力した stat ファイルを含むログディレク�
 
 &nbsp; &nbsp; 実行したメッセージブローカがタイムアウト方式であることを指定する．このオプションを指定する場合，***`-n`*** オプションは指定できない．
 
+### raft_test.sh
+
+```
+./raft_test.sh
+```
+
+#### 説明
+
+以下の3パターンのスループットを測定し，グラフを生成する．生成されるグラフは，1のデータから1枚と，2,3のデータから1枚の合計2枚である．
+1. Raftノード5で，センダ，レシーバともに1,10,20の9組のスループットを測定する．
+2. センダ，レシーバともに1で，Raftノード1から10までの10組のスループットを測定する．
+3. センダ，レシーバともに10で，Raftノード1から10までの10組のスループットを測定する．
+
+scriptsディレクトリの上の階層のlogディレクトリを削除して再生成するため，注意が必要である．
+
+
 ## 使い方
 
 ### autotest\_all.sh の使用例
@@ -376,3 +393,35 @@ input\_file は mpstat で出力されたファイルである．input\_file に
 ./plot_from_mpstat_log.py input_file output_file cores
 ```
 input\_file は log2csv.sh で出力されたファイルである．output\_file に .pdf をつけたファイルが出力される．
+
+### raft_test.sh の使用例
+
+このスクリプトはscriptsディレクトリ内で使用する．スクリプト内で，カレントディレクトリからの相対的な位置にあるファイルを操作しているため，scriptsディレクトリ以外から実行すると正常に動作しない．
+```
+# /scripts
+./raft_test.sh
+```
+
+### 実行結果
+
+```
+# 実際の出力ファイル
+# /scripts
+ls ../log
+10_clients_n_nodes
+1_and_10_clients_n_nodes.pdf
+1_clients_n_nodes
+n_clients_5_nodes
+n_clients_5_nodes.pdf
+```
+ファイルとディレクトリの説明
+1. 1_clients_n_nodes
+   + 1.1センダ，レシーバともに1で，Raftノード1から10までの10組のデータを含むディレクトリ
+2. 10_clients_n_nodes
+   + センダ，レシーバともに10で，Raftノード1から10までの10組のデータを含むディレクトリ
+3. 1_and_10_clients_n_nodes.pdf
+   + 1,2のデータから生成された，メッセージブローカのスループットを表すグラフ
+4. n_clients_5_nodes
+   + Raftノード5で，センダ，レシーバともに1,10,20の9組のデータを含むディレクトリ
+5. n_clients_5_nodes.pdf
+   + 4のデータから生成された，メッセージブローカのスループットを表すグラフ
