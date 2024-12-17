@@ -39,6 +39,7 @@ pub struct MBroker {
     timeout: u64,
     log_target: Box<dyn Write + Send>,
     raft_nodes: u32,
+    my_address: String,
 }
 
 impl MBroker {
@@ -61,7 +62,7 @@ impl MBroker {
     ) -> Result<Self, io::Error>
     where
         S: Into<c_uint>,
-        T: ToSocketAddrs,
+        T: ToSocketAddrs + ToString,
         U: Into<u64>,
         V: ToString,
         W: ToString,
@@ -78,11 +79,12 @@ impl MBroker {
         }
 
         Ok(Self {
-            service: NetService::bind(sockaddr)?,
+            service: NetService::bind(sockaddr.to_string())?,
             myid: myid.into(),
             timeout: timeout.into(),
             log_target: get_writable(log_target_name.to_string()).unwrap(),
-            raft_nodes
+            raft_nodes,
+            my_address: sockaddr.to_string(),
         })
     }
 
@@ -95,7 +97,7 @@ impl MBroker {
         let mq_pool = MQueuePool::new();
         let mq_pool = Arc::new(RwLock::new(mq_pool));
         let mq_pool_clone = Arc::clone(&mq_pool);
-        thread::spawn(move || {start_raft(proposals_clone, mq_pool_clone, self.raft_nodes);});
+        thread::spawn(move || {start_raft(proposals_clone, mq_pool_clone, self.raft_nodes, self.my_address);});
         let msg_id = FIRST_MSG_ID;
         let msg_id = Arc::new(Mutex::new(msg_id));
         let timeout_len = self.timeout;

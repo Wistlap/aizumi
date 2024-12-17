@@ -9,7 +9,7 @@ use std::os::unix::io::AsRawFd;
 /// A TCP socket server, listening for connections
 #[derive(Debug)]
 pub struct NetService {
-    listener: TcpListener,
+    pub listener: TcpListener,
 }
 
 impl NetService {
