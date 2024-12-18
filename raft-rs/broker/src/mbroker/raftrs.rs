@@ -156,7 +156,6 @@ fn run_node(
                             stream.read_exact(&mut buf).unwrap();
                             let msg = Message::parse_from_bytes(&buf);
                             if let Ok(msg) = msg {
-                                println!("msg: {:?}", msg);
                                 let _ = tx.send(msg);
                             }
                         }
