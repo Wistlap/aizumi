@@ -47,7 +47,7 @@ def scrapbox_from_2ddict(d, title, legend='\\', does_print_sd=False):
 def main(dirs, sd, n, t):
   log_dirs = dirs
   paths = list(flatten(glob.glob(f'{log_dir}/*.log.stat') for log_dir in log_dirs))
-  reg = re.compile('.*-(?P<sender>[0-9]+)-(?P<receiver>[0-9]+)-(?P<thread>[0-9]+)-(?P<message>[0-9]+)-(?P<date>[0-9]+-[0-9]+).log.stat$')
+  reg = re.compile('.*-(?P<sender>[0-9]+)-(?P<receiver>[0-9]+)-(?P<thread>[0-9]+)-(?P<message>[0-9]+)-(?P<node>[0-9]+)-(?P<date>[0-9]+-[0-9]+).log.stat$')
   tables = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
   for path in paths:

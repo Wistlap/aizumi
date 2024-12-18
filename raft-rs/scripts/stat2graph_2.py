@@ -35,6 +35,8 @@ def scatter_plot(df, df_c, file):
 # 平均値の棒グラフ描画
 def bar_plot(df, df_c, file):
   splot = seaborn.barplot(x=df_c[0],y=df_c[2],hue=df_c[1],data=df, palette="Set1", errorbar=None, dodge=True)
+  # # 凡例を削除
+  # splot.get_legend().remove()
   plt.ylim(0, max(df[df_c[2]])*1.1)
   # 凡例の表示形式を変更する場合
   # plt.legend(loc="center", title=df_c[1], ncol=5, bbox_to_anchor=(.5, 1.1))
@@ -55,7 +57,7 @@ def main(dirs, n, t, scatter, bar):
     legend = 'sender-receiver'
   else:
     legend = ''
-  dataframe_column = ['raft nodes', legend, 'throughput(msg/sec)']
+  dataframe_column = ['Raft nodes', legend, 'throughput (msgs/s)']
 
   # 各ログディレクトリ内の .log.stat ファイルからスループットを計算しリストに保存
   for path in paths:
@@ -73,8 +75,8 @@ def main(dirs, n, t, scatter, bar):
       throughput = message_num/time
       table.append([broker_opt2_num, (sender_num, receiver_num), broker, throughput])
   table.sort()
-  table = [[broker_opt2, f'{sender}-{receiver}', throughput] for broker_opt2, (sender, receiver), broker, throughput in table]
-  # print(table)
+  table = [[broker_opt2, f's:{sender}-r:{receiver}', throughput] for broker_opt2, (sender, receiver), broker, throughput in table]
+  print(table)
 
 
   # データフレームの作成
