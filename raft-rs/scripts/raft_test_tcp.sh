@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# use this script in scripts directory
+
 function is_receiver_working() {
     test $(ps | grep m-receiver | wc -l) != 0
 }
@@ -39,12 +41,20 @@ num_receivers=1
 num_senders=1
 for i in $(seq 1 10)
 do
+    echo
+    echo
     echo "s1 r1 broker-nodes $i"
+    log_file_is_exist=0
     for j in $(seq $i)
     do
         ip=$BROKER_ADDR$(expr $BROKER_PORT + $j - 1)
-        log_file=$LOG_DIR_1/raf-rs-broker-$num_senders-$num_receivers-1-$MESSAGE_COUNT-$j-$date.log
-        $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file -g $i&
+        log_file=$LOG_DIR_1/raf-rs-broker-$num_senders-$num_receivers-1-$MESSAGE_COUNT-$i-$date.log
+        if [ $log_file_is_exist -eq 0 ]; then
+            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file -g $i&
+            log_file_is_exist=1
+        else
+            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -g $i&
+        fi
     done
     sleep 4
 
@@ -71,12 +81,20 @@ num_receivers=10
 num_senders=10
 for i in $(seq 1 10)
 do
+    echo
+    echo
     echo "s10 r10 nodes $i"
+    log_file_is_exist=0
     for j in $(seq $i)
     do
         ip=$BROKER_ADDR$(expr $BROKER_PORT + $j - 1)
-        log_file=$LOG_DIR_10/raf-rs-broker-$num_senders-$num_receivers-1-$MESSAGE_COUNT-$j-$date.log
-        $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file -g $i&
+        log_file=$LOG_DIR_10/raf-rs-broker-$num_senders-$num_receivers-1-$MESSAGE_COUNT-$i-$date.log
+        if [ $log_file_is_exist -eq 0 ]; then
+            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file -g $i&
+            log_file_is_exist=1
+        else
+            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -g $i&
+        fi
     done
     sleep 4
 
@@ -112,12 +130,20 @@ for i in 1 2 4 10
 do
     for j in 1 2 4 10
     do
-    echo "s$i r$j nodes 5"
+        echo
+        echo
+        echo "s$i r$j nodes 5"
+        log_file_is_exist=0
         for k in $(seq 5)
         do
             ip=$BROKER_ADDR$(expr $BROKER_PORT + $k - 1)
             log_file=$LOG_DIR_N/raf-rs-broker-$i-$j-1-$MESSAGE_COUNT-5-$date.log
-            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file -g 5&
+            if [ $log_file_is_exist -eq 0 ]; then
+                $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file -g 5&
+                log_file_is_exist=1
+            else
+                $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -g 5&
+            fi
         done
         sleep 4
 
@@ -148,4 +174,11 @@ do
     done
 done
 
-
+echo
+./csv2stat_all.sh ../log/1_clients_n_nodes
+sleep 1
+echo
+./csv2stat_all.sh ../log/10_clients_n_nodes
+sleep 1
+echo
+./csv2stat_all.sh ../log/n_clients_5_nodes
