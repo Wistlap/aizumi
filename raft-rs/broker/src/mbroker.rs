@@ -186,14 +186,15 @@ fn treat_client(
                 Ok(mut msg) => match msg.header.msg_type() {
                     MessageType::SendReq => {
                         // TODO: Raftによる処理を追加
-                        timer.append(msg.header.id, msg.header.msg_type(), time_now()); //1
+                        let src_msg_id = msg.header.id;
+                        timer.append(src_msg_id, msg.header.msg_type(), time_now()); //1
                         let mut ack = into_normal_ack(msg.clone(), myid);
                         msg.header.id = get_msg_id(Arc::clone(&msg_id));
 
                         let (proposal, rx) = Proposal::normal(msg.clone());
                         proposals.lock().unwrap().push_back(proposal);
                         rx.recv().unwrap();
-                        timer.append(ack.header.id, ack.header.msg_type(), time_now()); //2
+                        timer.append(src_msg_id, ack.header.msg_type(), time_now()); //2
                         // println!("consensus result(SendReq): {:?}", res.header);
                         stream.send_msg(&mut ack).unwrap();
                         _counter += 1;
@@ -210,7 +211,7 @@ fn treat_client(
                         if is_ready_to_send(&mq_pool.read().unwrap().find_by_id(msg.header.saddr).unwrap().clone().read().unwrap()) {
                             msg.header.change_msg_type(MessageType::PushReq);
                             let (proposal, rx) = Proposal::normal(msg.clone());
-                            timer.append(msg.header.id, msg.header.msg_type().ack().unwrap(), time_now()); //8
+                            let tsc = time_now();
                             proposals.lock().unwrap().push_back(proposal);
                             // After we got a response from `rx`, we can assume the put succeeded and following
                             // `get` operations can find the key-value pair.
@@ -219,6 +220,7 @@ fn treat_client(
                                 None => continue,
                             };
                             // println!("consensus result(FreeReq): {:?}", res.header);
+                            timer.append(res.header.id, res.header.msg_type().ack().unwrap(), tsc); //8
                             timer.append(res.header.id, res.header.msg_type(), time_now()); //7
                             stream.send_msg(&mut res).unwrap();
                         }
@@ -260,13 +262,14 @@ fn treat_client(
                 if is_ready_to_send(&mqueue.read().unwrap()) {
                     let msg = Message::new(MessageHeader::new(MessageType::PushReq, client_id as c_uint, 0 as c_uint, 0 as c_uint));
                 let (proposal, rx) = Proposal::normal(msg.clone());
-                timer.append(msg.header.id, msg.header.msg_type().ack().unwrap(), time_now()); //8
+                let tsc = time_now();
                 proposals.lock().unwrap().push_back(proposal);
                 let mut res = match rx.recv().unwrap() {
                     Some(msg) => msg,
                     None => continue,
                 };
                 // println!("consensus result(Timeout): {:?}", res.header);
+                timer.append(res.header.id, res.header.msg_type().ack().unwrap(),tsc); //8
                 timer.append(res.header.id, res.header.msg_type(), time_now()); //7
                 stream.send_msg(&mut res).unwrap();
                 }
