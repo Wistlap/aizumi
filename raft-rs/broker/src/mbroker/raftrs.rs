@@ -5,12 +5,12 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use nix::sys::socket::{setsockopt, sockopt};
-use slog::Drain;
-use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use slog::{debug, Drain};
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 // use std::ffi::NulError;
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::thread;
@@ -53,17 +53,26 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     my_port += 1000;
     let addr_clone = addr.clone();
     let my_port_clone = my_port;
+
     // Get streams for recv from other nodes
     thread::spawn(move || {
         let listener = TcpListener::bind(format!("{}:{}", addr_clone, my_port_clone)).unwrap();
         setsockopt(&listener, sockopt::ReuseAddr, &true).unwrap();
 
-        let mut streams = Vec::new();
+        let mut streams: BTreeMap<u64, TcpStream> = BTreeMap::new();
         for _ in 1..num_nodes {
-            let (stream, _) = listener.accept().unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
             stream.set_nodelay(true).unwrap();
-            // stream.set_nonblocking(true).unwrap();
-            streams.push(stream);
+
+            let mut size_buf = [0; 4];
+            stream.read_exact(&mut size_buf).unwrap();
+            let size = u32::from_be_bytes(size_buf) as usize;
+            let mut buf = vec![0; size];
+            stream.read_exact(&mut buf).unwrap();
+
+            let port = u64::from_be_bytes(buf.try_into().unwrap());
+            stream.set_nonblocking(true).unwrap();
+            streams.insert(port, stream);
         }
         // return streams to main thread
         accept_tx.send(streams).unwrap();
@@ -71,7 +80,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
 
     // Get streams for send to other nodes
     thread::spawn(move || {
-        let mut streams = Vec::new();
+        let mut streams: BTreeMap<u64, TcpStream> = BTreeMap::new();
 
         // FIXME: ブローカの port 番号が5555以降の連番であることに依存している
         for port in LEADER_NODE..LEADER_NODE+num_nodes {
@@ -80,9 +89,15 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
             }
             loop {
                 match TcpStream::connect(format!("{}:{}", addr, port)) {
-                    Ok(stream) => {
+                    Ok(mut stream) => {
                         stream.set_nodelay(true).unwrap();
-                        streams.push(stream);
+
+                        let bytes = my_port_clone.to_be_bytes();
+                        let size = bytes.len();
+                        stream.write_all(&(size as u32).to_be_bytes()).unwrap();
+                        stream.write_all(&bytes).unwrap();
+
+                        streams.insert(port, stream);
                         break;
                     }
                     Err(_) => {
@@ -102,15 +117,19 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     let recv_streams = accept_rx.recv().unwrap();
     let send_streams = connect_rx.recv().unwrap();
 
-    let recv_streams = (1..num_nodes).zip(recv_streams.into_iter().map(|s| s.try_clone().unwrap())).collect();
-    // A map[peer_id -> sender]. In the example we create 5 nodes, with ids in [1, 5].
-    let send_streams = (1..num_nodes).zip(send_streams.into_iter().map(|s| s.try_clone().unwrap())).collect();
+    // recv_streams と send_stream から，BtreeMap (port - LEADER_NODE +1, (send_stream, recv_stream)) を作成
+    let streams: BTreeMap<u64, (TcpStream, TcpStream)> = recv_streams.iter()
+                                                                    .map(
+                                                                        |(k, v)| (*k - LEADER_NODE +1, (send_streams.get(k).unwrap().try_clone().unwrap(), v.try_clone().unwrap()))
+                                                                    )
+                                                                    .collect();
+
     let mq_pool = Arc::clone(&mq_pool);
     let node = match my_port {
         // Peer 1 is the leader.
-        LEADER_NODE => Node::create_raft_leader(1, recv_streams, send_streams, &logger, mq_pool),
+        LEADER_NODE => Node::create_raft_leader(1, streams, &logger, mq_pool),
         // Other peers are followers.
-        _ => Node::create_raft_follower(recv_streams, send_streams),
+        _ => Node::create_raft_follower(streams),
     };
 
     // A global pending proposals queue. New proposals will be pushed back into the queue, and
@@ -122,9 +141,9 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
 
     // Propose some conf changes so that followers can be initialized.
     let proposals = Arc::clone(&proposals);
-    add_all_followers(proposals.as_ref(), num_nodes);
-
-    // info!(logger, "Propose conf changes success!\n\n");
+    if my_port == LEADER_NODE {
+        add_all_followers(proposals.as_ref(), num_nodes);
+    }
 
     // Wait for the thread to finish
     // No return because the broker uses Raft
@@ -136,35 +155,20 @@ fn run_node(
     proposals: Arc<Mutex<VecDeque<Proposal>>>,
     logger: slog::Logger,
 ){
-    let (tx, rx) = mpsc::channel();
-    if ! node.recv_streams.is_empty() {
-        // Step raft messages.
-        // create threads for each stream
-        for (_, stream) in node.recv_streams.iter() {
-            let tx = tx.clone();
-            let mut stream = stream.try_clone().unwrap();
+    // Channels for receiving messages from other nodes.
+    let (recv_tx, recv_rx) = mpsc::channel();
+    let mut send_txs: BTreeMap<u64, Sender<Vec<Message>>> = BTreeMap::new();
+    if ! node.streams.is_empty() {
+        let keys: Vec<u64> = node.streams.keys().cloned().collect();
+        for key in keys {
+            // Channels for sending messages to other nodes.
+            let (send_tx, send_rx) = mpsc::channel();
+            send_txs.insert(key, send_tx);
+            let recv_tx = recv_tx.clone();
+            let mut stream_pair = node.streams.remove(&key).unwrap();
+            let logger = logger.clone();
             thread::spawn(move || {
-                let mut size_buf = [0; 4];
-                loop {
-                    match stream.read(&mut size_buf) {
-                        Ok(0) => {
-                            break;
-                        }
-                        Ok(_) => {
-                            let size = u32::from_be_bytes(size_buf) as usize;
-                            let mut buf = vec![0; size];
-                            stream.read_exact(&mut buf).unwrap();
-                            let msg = Message::parse_from_bytes(&buf);
-                            if let Ok(msg) = msg {
-                                let _ = tx.send(msg);
-                            }
-                        }
-                        Err(_) => {
-                            // その他のエラー処理
-                            break;
-                        }
-                    }
-                }
+                treat_node(&mut stream_pair.0, &mut stream_pair.1, send_rx, recv_tx, logger);
             });
         }
     }
@@ -173,7 +177,7 @@ fn run_node(
     let mut t = Instant::now();
     loop {
         loop {
-            match rx.try_recv() {
+            match recv_rx.try_recv() {
                 Ok(msg) => node.step(msg, &logger),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
@@ -205,11 +209,76 @@ fn run_node(
         on_ready(
             raft_group,
             Arc::clone(&node.mq_pool),
-            &mut node.send_streams,
+            &mut send_txs,
             &proposals,
-            &logger,
-            raft_group.raft.id
+            &logger
         );
+    }
+}
+
+fn treat_node(
+    send_stream: &mut TcpStream,
+    recv_stream: &mut TcpStream,
+    send_rx: Receiver<Vec<Message>>,
+    recv_tx: Sender<Message>,
+    logger: slog::Logger,
+) {
+    loop {
+        // If there are messages to send to other nodes, send it.
+        match send_rx.try_recv() {
+            Ok(msgs) => {
+                for msg in msgs {
+                    let to = msg.to;
+                    let bytes = msg.write_to_bytes().unwrap();
+                    let size = bytes.len();
+                    send_stream.write_all(&size.to_be_bytes()).unwrap();
+                    if send_stream.write_all(&bytes).is_err() {
+                        error!(
+                            logger,
+                            "send raft message to {} fail, let Raft retry it", to
+                        );
+                    }
+                }
+            },
+            Err(TryRecvError::Empty) => (),
+            Err(TryRecvError::Disconnected) => {
+                error!(logger, "send_rx disconnected");
+                return;
+            },
+        }
+
+        // If there are messages received from other nodes, send it to the Raft node.
+        let mut size_buf = [0; 4];
+        match recv_stream.read_exact(&mut size_buf) {
+            Ok(_) => {
+                let size = u32::from_be_bytes(size_buf) as usize;
+                let mut buf = vec![0; size];
+                loop {
+                    match recv_stream.read_exact(&mut buf) {
+                        Ok(_) => {
+                            let msg = Message::parse_from_bytes(&buf);
+                            if let Ok(msg) = msg {
+                                debug!(logger, "{:?}", msg);
+                                let _ = recv_tx.send(msg);
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            match e.kind() {
+                                ErrorKind::WouldBlock => (),
+                                _ => break,
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                match e.kind() {
+                    ErrorKind::WouldBlock => (),
+                    _ => break
+                }
+            }
+        }
     }
 }
 
@@ -231,8 +300,7 @@ fn check_signals(receiver: &Arc<Mutex<mpsc::Receiver<Signal>>>) -> bool {
 struct Node {
     // None if the raft is not initialized.
     raft_group: Option<RawNode<MemStorage>>,
-    recv_streams: HashMap<u64, TcpStream>,
-    send_streams: HashMap<u64, TcpStream>,
+    streams: BTreeMap<u64, (TcpStream, TcpStream)>,
     // Key-value pairs after applied. `MemStorage` only contains raft logs,
     // so we need an additional storage engine.
     mq_pool: Arc<RwLock<MQueuePool>>,
@@ -242,8 +310,7 @@ impl Node {
     // Create a raft leader only with itself in its configuration.
     fn create_raft_leader(
         id: u64,
-        recv_streams: HashMap<u64, TcpStream>,
-        send_streams: HashMap<u64, TcpStream>,
+        streams: BTreeMap<u64, (TcpStream, TcpStream)>,
         logger: &slog::Logger,
         mq_pool: Arc<RwLock<MQueuePool>>,
     ) -> Self {
@@ -262,21 +329,18 @@ impl Node {
         let raft_group = Some(RawNode::new(&cfg, storage, &logger).unwrap());
         Node {
             raft_group,
-            recv_streams,
-            send_streams,
+            streams,
             mq_pool,
         }
     }
 
     // Create a raft follower.
     fn create_raft_follower(
-        recv_streams: HashMap<u64, TcpStream>,
-        send_streams: HashMap<u64, TcpStream>,
+        streams: BTreeMap<u64, (TcpStream, TcpStream)>,
     ) -> Self {
         Node {
             raft_group: None,
-            recv_streams,
-            send_streams,
+            streams,
             mq_pool: Arc::new(RwLock::new(MQueuePool::new())),
         }
     }
@@ -310,10 +374,9 @@ impl Node {
 fn on_ready(
     raft_group: &mut RawNode<MemStorage>,
     mq_pool: Arc<RwLock<MQueuePool>>,
-    send_streams: &mut HashMap<u64, TcpStream>,
+    send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>,
     proposals: &Mutex<VecDeque<Proposal>>,
     logger: &slog::Logger,
-    raft_id: u64,
 ) {
     if !raft_group.has_ready() {
         return;
@@ -323,27 +386,23 @@ fn on_ready(
     // Get the `Ready` with `RawNode::ready` interface.
     let mut ready = raft_group.ready();
 
-    let mut handle_messages = |msgs: Vec<Message>| {
+    fn handle_messages(msgs: Vec<Message>, send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>) {
+        let mut msgs_group: BTreeMap<u64, Vec<Message>> = BTreeMap::new();
         for msg in msgs {
-            let mut to = msg.to;
-            if to > raft_id {
-                to -= 1;
-            }
-            let bytes = msg.write_to_bytes().unwrap();
-            let size = bytes.len();
-            send_streams.get_mut(&to).unwrap().write_all(&size.to_be_bytes()).unwrap();
-            if send_streams.get_mut(&to).unwrap().write_all(&msg.write_to_bytes().unwrap()).is_err() {
-                error!(
-                    logger,
-                    "send raft message to {} fail, let Raft retry it", to
-                );
+            let key = msg.to;
+            // devide the messages by the destination node.
+            msgs_group.entry(key).or_default().push(msg);
+        }
+        for (key, send_tx) in send_txs {
+            if let Some(value) = msgs_group.remove(key) {
+                send_tx.send(value).unwrap();
             }
         }
-    };
+    }
 
     if !ready.messages().is_empty() {
         // Send out the messages come from the node.
-        handle_messages(ready.take_messages());
+        handle_messages(ready.take_messages(), send_txs);
     }
 
     // Apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
@@ -388,7 +447,7 @@ fn on_ready(
                                 }
                             };
                             drop(mq_pool);
-                            // info!(logger, "peer {}: process SendReq: {:?}", rn.raft.id, msg.header.id);
+                            debug!(logger, "peer {}: process SendReq: {:?}", rn.raft.id, msg.header.id);
                             mqueue.write().unwrap().waiting_queue.enqueue(msg);
                             None
                         }
@@ -405,7 +464,7 @@ fn on_ready(
                                 .delivered_queue
                                 .dequeue_by(|queued_msg| queued_msg.header.id == msg_id)
                                 .unwrap();
-                            // info!(logger, "peer {}: process FreeReq: {:?}", rn.raft.id, msg_id);
+                            debug!(logger, "peer {}: process FreeReq: {:?}", rn.raft.id, msg_id);
                             None
                         }
                         MbMessageType::PushReq => {
@@ -421,7 +480,7 @@ fn on_ready(
                                 // timer.append(msg.header.id, msg.header.msg_type(), time_now());
                                 // stream.send_msg(&mut msg).unwrap();
                                 mqueue.delivered_queue.enqueue(msg.clone());
-                                //info!(logger, "peer {}: process inner PushReq or Timeout: {:?}", rn.raft.id, msg.header.id);
+                                debug!(logger, "peer {}: process inner PushReq or Timeout: {:?}", rn.raft.id, msg.header.id);
                                 Some(msg)
                             } else {
                                 None
@@ -435,7 +494,7 @@ fn on_ready(
                                     mq_pool.add(client_id, MQueue::new(client_id));
                                 };
                             }
-                            //info!(logger, "peer {}: process HeloReq: {:?}", rn.raft.id, msg.header.id);
+                            debug!(logger, "peer {}: process HeloReq: {:?}", rn.raft.id, msg.header.id);
                             None
                         }
                         _ => {
@@ -450,7 +509,6 @@ fn on_ready(
                     // succeeded or not.
                     let proposal = proposals.lock().unwrap().pop_front().unwrap();
                     proposal.propose_success.send(res).unwrap();
-                    //TODO: ここのチャネルは同プロセス内のブローカ↔Raft間の通信のため，このままでよい
                 }
             }
         };
@@ -474,7 +532,7 @@ fn on_ready(
 
     if !ready.persisted_messages().is_empty() {
         // Send out the persisted messages come from the node.
-        handle_messages(ready.take_persisted_messages());
+        handle_messages(ready.take_persisted_messages(), send_txs);
     }
 
     // Call `RawNode::advance` interface to update position flags in the raft.
@@ -484,7 +542,7 @@ fn on_ready(
         store.wl().mut_hard_state().set_commit(commit);
     }
     // Send out the messages.
-    handle_messages(light_rd.take_messages());
+    handle_messages(light_rd.take_messages(), send_txs);
     // Apply all committed entries.
     handle_committed_entries(raft_group, light_rd.take_committed_entries());
     // Advance the apply index.
@@ -577,7 +635,6 @@ fn add_all_followers(proposals: &Mutex<VecDeque<Proposal>>, num_nodes: u64) {
         loop {
             let (proposal, rx) = Proposal::conf_change(&conf_change);
             proposals.lock().unwrap().push_back(proposal);
-            // TODO: is_none()でいいのか
             if rx.recv().unwrap().is_none() {
                 break;
             }
