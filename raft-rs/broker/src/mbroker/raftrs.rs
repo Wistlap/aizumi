@@ -7,9 +7,8 @@
 use nix::sys::socket::{setsockopt, sockopt};
 use slog::{debug, Drain};
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-// use std::ffi::NulError;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -18,7 +17,6 @@ use std::thread;
 use protobuf::Message as PbMessage;
 use raft::storage::MemStorage;
 use raft::{prelude::*, StateRole};
-// use regex::Regex;
 
 use slog::{error, o};
 
@@ -71,7 +69,7 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
             stream.read_exact(&mut buf).unwrap();
 
             let port = u64::from_be_bytes(buf.try_into().unwrap());
-            stream.set_nonblocking(true).unwrap();
+            // stream.set_nonblocking(true).unwrap();
             streams.insert(port, stream);
         }
         // return streams to main thread
@@ -165,10 +163,14 @@ fn run_node(
             let (send_tx, send_rx) = mpsc::channel();
             send_txs.insert(key, send_tx);
             let recv_tx = recv_tx.clone();
-            let mut stream_pair = node.streams.remove(&key).unwrap();
-            let logger = logger.clone();
+            let (mut send_stream, mut recv_stream) = node.streams.remove(&key).unwrap();
+            let logger_r = logger.clone();
             thread::spawn(move || {
-                treat_node(&mut stream_pair.0, &mut stream_pair.1, send_rx, recv_tx, logger);
+                treat_recv_stream( &mut recv_stream, recv_tx, logger_r);
+            });
+            let logger_s = logger.clone();
+            thread::spawn(move || {
+                treat_send_stream( &mut send_stream, send_rx, logger_s);
             });
         }
     }
@@ -216,67 +218,57 @@ fn run_node(
     }
 }
 
-fn treat_node(
-    send_stream: &mut TcpStream,
+fn treat_recv_stream(
     recv_stream: &mut TcpStream,
-    send_rx: Receiver<Vec<Message>>,
     recv_tx: Sender<Message>,
     logger: slog::Logger,
 ) {
     loop {
-        // If there are messages to send to other nodes, send it.
-        match send_rx.try_recv() {
-            Ok(msgs) => {
-                for msg in msgs {
-                    let to = msg.to;
-                    let bytes = msg.write_to_bytes().unwrap();
-                    let size = bytes.len();
-                    send_stream.write_all(&size.to_be_bytes()).unwrap();
-                    if send_stream.write_all(&bytes).is_err() {
-                        error!(
-                            logger,
-                            "send raft message to {} fail, let Raft retry it", to
-                        );
-                    }
-                }
-            },
-            Err(TryRecvError::Empty) => (),
-            Err(TryRecvError::Disconnected) => {
-                error!(logger, "send_rx disconnected");
-                return;
-            },
-        }
-
         // If there are messages received from other nodes, send it to the Raft node.
         let mut size_buf = [0; 4];
         match recv_stream.read_exact(&mut size_buf) {
             Ok(_) => {
                 let size = u32::from_be_bytes(size_buf) as usize;
                 let mut buf = vec![0; size];
-                loop {
-                    match recv_stream.read_exact(&mut buf) {
-                        Ok(_) => {
-                            let msg = Message::parse_from_bytes(&buf);
-                            if let Ok(msg) = msg {
-                                debug!(logger, "{:?}", msg);
-                                let _ = recv_tx.send(msg);
-                            }
-                            break;
-                        }
-                        Err(e) => {
-                            match e.kind() {
-                                ErrorKind::WouldBlock => (),
-                                _ => break,
-                            }
-                        }
-                    }
+                recv_stream.read_exact(&mut buf).unwrap();
+                let msg = Message::parse_from_bytes(&buf);
+                if let Ok(msg) = msg {
+                    debug!(logger, "{:?}", msg);
+                    let _ = recv_tx.send(msg);
                 }
-            }
+            },
             Err(e) => {
-                match e.kind() {
-                    ErrorKind::WouldBlock => (),
-                    _ => break
-                }
+                error!(logger, "Error in function treat_recv_stream: {}", e);
+                break;
+            }
+        }
+    }
+}
+
+fn treat_send_stream(
+    send_stream: &mut TcpStream,
+    send_rx: Receiver<Vec<Message>>,
+    logger: slog::Logger,
+) {
+    loop {
+        // If there are messages to send to other nodes, send it.
+        let msgs = match send_rx.recv(){
+            Ok(msgs) => msgs,
+            Err(e) => {
+                error!(logger, "Error in function treat_send_stream: {}", e);
+                break;
+            }
+        };
+        for msg in msgs {
+            let to = msg.to;
+            let bytes = msg.write_to_bytes().unwrap();
+            let size = bytes.len();
+            send_stream.write_all(&size.to_be_bytes()).unwrap();
+            if send_stream.write_all(&bytes).is_err() {
+                error!(
+                    logger,
+                    "send raft message to {} fail, let Raft retry it", to
+                );
             }
         }
     }
