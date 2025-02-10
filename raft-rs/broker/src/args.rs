@@ -1,3 +1,4 @@
+use clap::ArgAction;
 pub use clap::Parser;
 use std::fmt::Display;
 
@@ -49,10 +50,10 @@ pub struct Args {
     #[arg(short = 'u', long, default_value_t = 0)]
     pub myid: u32,
 
-    /// Number of Raft group nodes
-    ///
-    #[arg(short = 'g', long, default_value_t = 5)]
-    pub raft_nodes: u32,
+    /// Addresses of Raft group nodes that includes myself
+    #[arg(short = 'g', long, num_args = 1.., action = ArgAction::Append, default_values_t = vec![String::from("127.0.0.1:5555")])]
+    pub raft_addrs: Vec<String>,
+
 }
 
 impl Display for Args {
@@ -65,7 +66,7 @@ impl Display for Args {
         let output = format!("{output}log-file: {}\n", self.log_file);
         let output = format!("{output}pid-file: {}\n", self.pid_file);
         let output = format!("{output}myid: {}\n", self.myid);
-        let output = format!("{output}raft-nodes: {}\n", self.raft_nodes);
+        let output = format!("{output}raft-addrs: {:?}\n", self.raft_addrs);
 
         f.write_str(output.as_str())
     }

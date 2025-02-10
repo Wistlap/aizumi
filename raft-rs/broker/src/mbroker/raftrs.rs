@@ -27,7 +27,12 @@ use super::queue::{MQueue, MQueuePool};
 
 const LEADER_NODE: u64 = 6555;
 
-pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock<MQueuePool>>, raft_nodes: u32, my_address: String) {
+pub fn start_raft(
+    proposals: Arc<Mutex<VecDeque<Proposal>>>,
+    mq_pool: Arc<RwLock<MQueuePool>>,
+    my_address: String,
+    raft_addresses: Vec<String>
+) {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain)
@@ -37,24 +42,32 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
         .fuse();
     let logger = slog::Logger::root(drain, o!());
 
-    let num_nodes: u64 = raft_nodes as u64;
+    let num_nodes: u64 = raft_addresses.len() as u64;
 
     // Channels for getting streams from ather temporary threads
     let (accept_tx, accept_rx) = mpsc::channel();
     let (connect_tx, connect_rx) = mpsc::channel();
 
-    // let my_address_clone = my_address.clone();
-    let addr = my_address.clone().split(":").collect::<Vec<&str>>()[0].to_string();
-    let my_port = my_address.split(":").collect::<Vec<&str>>()[1].to_string();
-    let mut my_port = my_port.parse::<u64>().unwrap();
-    // ブローカの port 番号から 1000 を加算して Raft 用の port 番号を設定
-    my_port += 1000;
-    let addr_clone = addr.clone();
-    let my_port_clone = my_port;
+    // Add 1000 to the port number for Raft
+    let mut parts = my_address.rsplitn(2, ':');
+    let my_port = parts.next().unwrap().parse::<u64>().unwrap() + 1000;
+    let my_addr = parts.next().unwrap().to_string();
+    let my_new_ip = (my_addr, my_port);
+
+    let raft_addresses: Vec<(String, u64)> = raft_addresses
+    .iter()
+    .map(|ip| {
+        let mut parts = ip.rsplitn(2, ':');
+        let port = parts.next().unwrap().parse::<u64>().unwrap() + 1000;
+        let addr = parts.next().unwrap().to_string();
+        (addr, port)
+    })
+    .collect();
 
     // Get streams for recv from other nodes
+    let my_new_ip_clone = my_new_ip.clone();
     thread::spawn(move || {
-        let listener = TcpListener::bind(format!("{}:{}", addr_clone, my_port_clone)).unwrap();
+        let listener = TcpListener::bind(format!("{}:{}", my_new_ip_clone.0, my_new_ip.1)).unwrap();
         setsockopt(&listener, sockopt::ReuseAddr, &true).unwrap();
 
         let mut streams: BTreeMap<u64, TcpStream> = BTreeMap::new();
@@ -80,22 +93,21 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     thread::spawn(move || {
         let mut streams: BTreeMap<u64, TcpStream> = BTreeMap::new();
 
-        // FIXME: ブローカの port 番号が5555以降の連番であることに依存している
-        for port in LEADER_NODE..LEADER_NODE+num_nodes {
-            if port == my_port_clone {
+        for ip in raft_addresses.iter() {
+            if *ip == my_new_ip {
                 continue; // skip if port is my port
             }
             loop {
-                match TcpStream::connect(format!("{}:{}", addr, port)) {
+                match TcpStream::connect(format!("{}:{}", ip.0, ip.1)) {
                     Ok(mut stream) => {
                         stream.set_nodelay(true).unwrap();
 
-                        let bytes = my_port_clone.to_be_bytes();
+                        let bytes = my_new_ip.1.to_be_bytes();
                         let size = bytes.len();
                         stream.write_all(&(size as u32).to_be_bytes()).unwrap();
                         stream.write_all(&bytes).unwrap();
 
-                        streams.insert(port, stream);
+                        streams.insert(ip.1, stream);
                         break;
                     }
                     Err(_) => {
@@ -543,7 +555,7 @@ fn on_ready(
 
 fn example_config() -> Config {
     Config {
-        election_tick: 10,
+        election_tick: 30,
         heartbeat_tick: 3,
         ..Default::default()
     }

@@ -38,8 +38,8 @@ pub struct MBroker {
     myid: c_uint,
     timeout: u64,
     log_target: Box<dyn Write + Send>,
-    raft_nodes: u32,
     my_address: String,
+    raft_addresses: Vec<String>,
 }
 
 impl MBroker {
@@ -58,7 +58,7 @@ impl MBroker {
         log_target_name: V,
         log_filter_level: u32,
         pid_file_path: W,
-        raft_nodes: u32,
+        raft_addrs: Vec<String>,
     ) -> Result<Self, io::Error>
     where
         S: Into<c_uint>,
@@ -83,8 +83,8 @@ impl MBroker {
             myid: myid.into(),
             timeout: timeout.into(),
             log_target: get_writable(log_target_name.to_string()).unwrap(),
-            raft_nodes,
             my_address: sockaddr.to_string(),
+            raft_addresses: raft_addrs,
         })
     }
 
@@ -97,7 +97,7 @@ impl MBroker {
         let mq_pool = MQueuePool::new();
         let mq_pool = Arc::new(RwLock::new(mq_pool));
         let mq_pool_clone = Arc::clone(&mq_pool);
-        thread::spawn(move || {start_raft(proposals_clone, mq_pool_clone, self.raft_nodes, self.my_address);});
+        thread::spawn(move || {start_raft(proposals_clone, mq_pool_clone, self.my_address, self.raft_addresses);});
         let msg_id = FIRST_MSG_ID;
         let msg_id = Arc::new(Mutex::new(msg_id));
         let timeout_len = self.timeout;
