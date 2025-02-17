@@ -36,7 +36,7 @@ mkdir -p $LOG_DIR_10
 mkdir -p $LOG_DIR_N
 
 
-BROKERS_IP_5_NODES=(
+BROKERS_IP=(
     "127.0.0.1:5555"
     "127.0.0.1:5556"
     "127.0.0.1:5557"
@@ -51,7 +51,7 @@ BROKERS_IP_5_NODES=(
 # s1,r1,nods1,..,10
 num_receivers=1
 num_senders=1
-for ((i=1; i<=${#BROKERS_IP_5_NODES[@]}; i++))
+for ((i=1; i<=${#BROKERS_IP[@]}; i++))
 do
     echo "s1 r1 broker-nodes $i"
     log_file_is_exist=0
@@ -60,10 +60,10 @@ do
         ip=$BROKER_ADDR$(expr $BROKER_PORT + $j - 1)
         log_file=$LOG_DIR_1/raf-rs-broker-$num_senders-$num_receivers-1-$MESSAGE_COUNT-$i-$date.log
         if [ $log_file_is_exist -eq 0 ]; then
-            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file --raft-addrs "${BROKERS_IP_5_NODES[@]:0:$i}"&
+            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file --raft-addrs "${BROKERS_IP[@]:0:$i}"&
             log_file_is_exist=1
         else
-            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP_5_NODES[@]:0:$i}"&
+            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]:0:$i}"&
         fi
     done
     sleep 4
@@ -90,7 +90,7 @@ echo
 # s10,r10,nods1,..,10
 num_receivers=10
 num_senders=10
-for ((i=1; i<=${#BROKERS_IP_5_NODES[@]}; i++))
+for ((i=1; i<=${#BROKERS_IP[@]}; i++))
 do
     echo "s10 r10 nodes $i"
     log_file_is_exist=0
@@ -99,10 +99,10 @@ do
         ip=$BROKER_ADDR$(expr $BROKER_PORT + $j - 1)
         log_file=$LOG_DIR_10/raf-rs-broker-$num_senders-$num_receivers-1-$MESSAGE_COUNT-$i-$date.log
         if [ $log_file_is_exist -eq 0 ]; then
-            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file --raft-addrs "${BROKERS_IP_5_NODES[@]:0:$i}"&
+            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file --raft-addrs "${BROKERS_IP[@]:0:$i}"&
             log_file_is_exist=1
         else
-            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP_5_NODES[@]:0:$i}"&
+            $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]:0:$i}"&
         fi
     done
     sleep 4
@@ -135,29 +135,28 @@ done
 echo
 
 
-BROKERS_IP_5_NODES=(
+BROKERS_IP=(
     "127.0.0.1:5555"
     "127.0.0.1:5556"
     "127.0.0.1:5557"
-    "127.0.0.1:5558"
-    "127.0.0.1:5559"
 )
+num_nodes=${#BROKERS_IP[@]}
 # s1,2,4,10,r1,2,4,10,nods5
-for i in 1 2 4 10
+for i in 1 2 4 10 20 40
 do
-    for j in 1 2 4 10
+    for j in 1 2 4 10 20 40
     do
         echo "s$i r$j nodes 5"
         log_file_is_exist=0
-        for k in $(seq 5)
+        for k in $(seq $num_nodes)
         do
             ip=$BROKER_ADDR$(expr $BROKER_PORT + $k - 1)
-            log_file=$LOG_DIR_N/raf-rs-broker-$i-$j-1-$MESSAGE_COUNT-5-$date.log
+            log_file=$LOG_DIR_N/raf-rs-broker-$i-$j-1-$MESSAGE_COUNT-$num_nodes-$date.log
             if [ $log_file_is_exist -eq 0 ]; then
-                $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file --raft-addrs "${BROKERS_IP_5_NODES[@]}"&
+                $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $log_file --raft-addrs "${BROKERS_IP[@]}"&
                 log_file_is_exist=1
             else
-                $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP_5_NODES[@]}"&
+                $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]}"&
             fi
         done
         sleep 4
