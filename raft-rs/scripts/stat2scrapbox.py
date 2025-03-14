@@ -56,12 +56,14 @@ def main(dirs, sd, n, t):
     receiver_num = int(match.group('receiver'))
     thread_num = int(match.group('thread'))
     message_num = int(match.group('message'))
+    node_num = int(match.group('node'))
     with open(path, 'r') as f:
       reader = csv.reader(f)
       lines = list(reader)
       time = float(lines[1][2])
       throughput = int(message_num/time)
-      tables[thread_num][sender_num][receiver_num].append(throughput)
+      # tables[thread_num][sender_num][receiver_num].append(throughput)
+      tables[node_num][sender_num][receiver_num].append(throughput)
   if n:
     title = "thread"
   elif t:

@@ -35,8 +35,10 @@ def scatter_plot(df, df_c, file):
 # 平均値の棒グラフ描画
 def bar_plot(df, df_c, file):
   # 色を4グループごとに分ける
-  colors = ['#1f77b4'] * 4 + ['#ff7f0e'] * 4 + ['#2ca02c'] * 4 + ['#d62728'] * 4
+  # colors = ['#1f77b4'] * 4 + ['#ff7f0e'] * 4 + ['#2ca02c'] * 4 + ['#d62728'] * 4
+  colors = ['#1f77b4'] * 4 + ['#ff7f0e'] * 4 + ['#2ca02c'] * 4 + ['#d62728'] * 6 + ['#1f77b4'] * 3 + ['#ff7f0e'] * 4
   splot = seaborn.barplot(x=df_c[0],y=df_c[2],data=df, palette=colors, errorbar=None, dodge=True)
+  plt.grid(axis='y', linestyle='dashed', linewidth=0.7, alpha=0.5)
   plt.ylim(0, max(df[df_c[2]])*1.1)
   # 凡例の表示形式を変更する場合
   # plt.legend(loc="center", title=df_c[1], ncol=5, bbox_to_anchor=(.5, 1.1))
