@@ -4,8 +4,8 @@
 // same time. And reassignment can be optimized by compiler.
 #![allow(clippy::field_reassign_with_default)]
 
-use slog::Drain;
-use std::collections::{HashMap, VecDeque};
+use slog::{debug, Drain};
+use std::collections::{BTreeMap, VecDeque};
 // use std::ffi::NulError;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
@@ -37,12 +37,32 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     let num_nodes: u64 = raft_nodes as u64;
     // Create 5 mailboxes to send/receive messages. Every node holds a `Receiver` to receive
     // messages from others, and uses the respective `Sender` to send messages to others.
-    let (mut tx_vec, mut rx_vec) = (Vec::new(), Vec::new());
+    let mut tx_matrix: VecDeque<VecDeque<Sender<Message>>> = VecDeque::with_capacity(num_nodes as usize);
+    let mut rx_matrix: VecDeque<VecDeque<Receiver<Message>>> = VecDeque::with_capacity(num_nodes as usize);
     for _ in 0..num_nodes {
-        let (tx, rx) = mpsc::channel();
-        tx_vec.push(tx);
-        rx_vec.push(rx);
+        tx_matrix.push_back(VecDeque::new());
     }
+    for _ in 0..num_nodes {
+        rx_matrix.push_back(VecDeque::new());
+    }
+    for i in 0..num_nodes as usize {
+        for j in 0..num_nodes as usize {
+            let (tx, rx) = mpsc::channel();
+            tx_matrix[j].push_back(tx);   // j番目のスレッドに向けた送信用
+            rx_matrix[i].push_back(rx);   // i番目のスレッドが受信する用
+        }
+    }
+    // tx_matrix[i]とrx_matrix[i]を用いてBtreeMap<u64, (Sender<Message>, Receiver<Message>)>を作成
+    let mut mailboxes_v: VecDeque<BTreeMap<u64, (Sender<Message>, Receiver<Message>)>> = VecDeque::new();
+    for _ in 0..num_nodes {
+        mailboxes_v.push_back(BTreeMap::new());
+    }
+    for i in 0..num_nodes as usize {
+        for j in 0..num_nodes as usize {
+            mailboxes_v[i].insert(j as u64 + 1, (tx_matrix[i].pop_front().unwrap(), rx_matrix[i].pop_front().unwrap()));
+        }
+    }
+    println!("{:?}", mailboxes_v);
 
     let (_tx_stop, rx_stop) = mpsc::channel();
     let rx_stop = Arc::new(Mutex::new(rx_stop));
@@ -52,15 +72,14 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     // let proposals = Arc::new(Mutex::new(VecDeque::<Proposal>::new()));
 
     let mut handles = Vec::new();
-    for (i, rx) in rx_vec.into_iter().enumerate() {
+    for (i, mailboxes) in mailboxes_v.into_iter().enumerate() {
         // A map[peer_id -> sender]. In the example we create 5 nodes, with ids in [1, 5].
-        let mailboxes = (1..num_nodes+1).zip(tx_vec.iter().cloned()).collect();
         let mq_pool = Arc::clone(&mq_pool);
         let node = match i {
             // Peer 1 is the leader.
-            0 => Node::create_raft_leader(1, rx, mailboxes, &logger, mq_pool),
+            0 => Node::create_raft_leader(1, mailboxes, &logger, mq_pool),
             // Other peers are followers.
-            _ => Node::create_raft_follower(rx, mailboxes),
+            _ => Node::create_raft_follower(mailboxes),
         };
         let proposals = Arc::clone(&proposals);
         // Clone the stop receiver
@@ -81,6 +100,8 @@ pub fn start_raft(proposals: Arc<Mutex<VecDeque<Proposal>>>, mq_pool: Arc<RwLock
     //     tx_stop.send(Signal::Terminate).unwrap();
     // }
 
+    println!("after add followers");
+
     // Wait for the thread to finish
     // No return because the broker uses Raft
     for th in handles {
@@ -94,12 +115,43 @@ fn run_node(
     rx_stop_clone: Arc<Mutex<mpsc::Receiver<Signal>>>,
     logger: slog::Logger,
 ){
+    // Channels for receiving messages from other nodes.
+    let (recv_tx, recv_rx) = mpsc::channel();
+    let mut send_txs: BTreeMap<u64, Sender<Vec<Message>>> = BTreeMap::new();
+    if ! node.mailboxes.is_empty() {
+        let keys: Vec<u64> = node.mailboxes.keys().cloned().collect();
+        for key in keys {
+            // Channels for sending messages to other nodes.
+            let (send_tx, send_rx) = mpsc::channel();
+            send_txs.insert(key, send_tx);
+            let recv_tx = recv_tx.clone();
+            let (mut send_stream, mut recv_stream) = node.mailboxes.remove(&key).unwrap();
+            let logger_r = logger.clone();
+            thread::spawn(move || {
+                treat_recv_stream( &mut recv_stream, recv_tx, logger_r);
+            });
+            let logger_s = logger.clone();
+            thread::spawn(move || {
+                treat_send_stream( &mut send_stream, send_rx, logger_s);
+            });
+        }
+    }
+
+    println!("after send&recv threads");
+
     // Tick the raft node per 100ms. So use an `Instant` to trace it.
     let mut t = Instant::now();
     loop {
+        // loop {
+        //     // Step raft messages.
+        //     match node.my_mailbox.try_recv() {
+        //         Ok(msg) => node.step(msg, &logger),
+        //         Err(TryRecvError::Empty) => break,
+        //         Err(TryRecvError::Disconnected) => return,
+        //     }
+        // }
         loop {
-            // Step raft messages.
-            match node.my_mailbox.try_recv() {
+            match recv_rx.try_recv() {
                 Ok(msg) => node.step(msg, &logger),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
@@ -131,7 +183,7 @@ fn run_node(
         on_ready(
             raft_group,
             Arc::clone(&node.mq_pool),
-            &node.mailboxes,
+            &mut send_txs,
             &proposals,
             &logger,
         );
@@ -142,6 +194,69 @@ fn run_node(
         };
     }
 }
+
+fn treat_recv_stream(
+    recv_stream: &mut Receiver<Message>,
+    recv_tx: Sender<Message>,
+    logger: slog::Logger,
+) {
+    loop {
+        // If there are messages received from other nodes, send it to the Raft node.
+        let msg  =recv_stream.recv();
+        if let Ok(msg) = msg {
+            debug!(logger, "{:?}", msg);
+            // println!("{:?}", msg);
+            let _ = recv_tx.send(msg);
+        }
+        // let mut size_buf = [0; 4];
+        // match recv_stream.read_exact(&mut size_buf) {
+        //     Ok(_) => {
+        //         let size = u32::from_be_bytes(size_buf) as usize;
+        //         let mut buf = vec![0; size];
+        //         recv_stream.read_exact(&mut buf).unwrap();
+        //         let msg = Message::parse_from_bytes(&buf);
+        //         if let Ok(msg) = msg {
+        //             debug!(logger, "{:?}", msg);
+        //             let _ = recv_tx.send(msg);
+        //         }
+        //     },
+        //     Err(e) => {
+        //         error!(logger, "Error in function treat_recv_stream: {}", e);
+        //         break;
+        //     }
+        // }
+    }
+}
+
+fn treat_send_stream(
+    send_stream: &mut Sender<Message>,
+    send_rx: Receiver<Vec<Message>>,
+    logger: slog::Logger,
+) {
+    loop {
+        // If there are messages to send to other nodes, send it.
+        let msgs = match send_rx.recv(){
+            Ok(msgs) => msgs,
+            Err(e) => {
+                error!(logger, "Error in function treat_send_stream: {}", e);
+                break;
+            }
+        };
+        for msg in msgs {
+            let to = msg.to;
+            // let bytes = msg.write_to_bytes().unwrap();
+            // let size = bytes.len();
+            // send_stream.write_all(&size.to_be_bytes()).unwrap();
+            if send_stream.send(msg).is_err() {
+                error!(
+                    logger,
+                    "send raft message to {} fail, let Raft retry it", to
+                );
+            }
+        }
+    }
+}
+
 
 #[allow(dead_code)]
 enum Signal {
@@ -160,8 +275,7 @@ fn check_signals(receiver: &Arc<Mutex<mpsc::Receiver<Signal>>>) -> bool {
 struct Node {
     // None if the raft is not initialized.
     raft_group: Option<RawNode<MemStorage>>,
-    my_mailbox: Receiver<Message>,
-    mailboxes: HashMap<u64, Sender<Message>>,
+    mailboxes: BTreeMap<u64, (Sender<Message>, Receiver<Message>)>,
     // Key-value pairs after applied. `MemStorage` only contains raft logs,
     // so we need an additional storage engine.
     mq_pool: Arc<RwLock<MQueuePool>>,
@@ -171,8 +285,7 @@ impl Node {
     // Create a raft leader only with itself in its configuration.
     fn create_raft_leader(
         id: u64,
-        my_mailbox: Receiver<Message>,
-        mailboxes: HashMap<u64, Sender<Message>>,
+        mailboxes: BTreeMap<u64, (Sender<Message>, Receiver<Message>)>,
         logger: &slog::Logger,
         mq_pool: Arc<RwLock<MQueuePool>>,
     ) -> Self {
@@ -191,7 +304,6 @@ impl Node {
         let raft_group = Some(RawNode::new(&cfg, storage, &logger).unwrap());
         Node {
             raft_group,
-            my_mailbox,
             mailboxes,
             mq_pool,
         }
@@ -199,12 +311,10 @@ impl Node {
 
     // Create a raft follower.
     fn create_raft_follower(
-        my_mailbox: Receiver<Message>,
-        mailboxes: HashMap<u64, Sender<Message>>,
+        mailboxes: BTreeMap<u64, (Sender<Message>, Receiver<Message>)>,
     ) -> Self {
         Node {
             raft_group: None,
-            my_mailbox,
             mailboxes,
             mq_pool: Arc::new(RwLock::new(MQueuePool::new())),
         }
@@ -239,33 +349,50 @@ impl Node {
 fn on_ready(
     raft_group: &mut RawNode<MemStorage>,
     mq_pool: Arc<RwLock<MQueuePool>>,
-    mailboxes: &HashMap<u64, Sender<Message>>,
+    send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>,
     proposals: &Mutex<VecDeque<Proposal>>,
     logger: &slog::Logger,
 ) {
     if !raft_group.has_ready() {
         return;
     }
+
+    // println!("start consensus")
+
     let store = raft_group.raft.raft_log.store.clone();
 
     // Get the `Ready` with `RawNode::ready` interface.
     let mut ready = raft_group.ready();
 
-    let handle_messages = |msgs: Vec<Message>| {
+    // let handle_messages = |msgs: Vec<Message>| {
+    //     for msg in msgs {
+    //         let to = msg.to;
+    //         if mailboxes[&to].send(msg).is_err() {
+    //             error!(
+    //                 logger,
+    //                 "send raft message to {} fail, let Raft retry it", to
+    //             );
+    //         }
+    //     }
+    // };
+
+    fn handle_messages(msgs: Vec<Message>, send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>) {
+        let mut msgs_group: BTreeMap<u64, Vec<Message>> = BTreeMap::new();
         for msg in msgs {
-            let to = msg.to;
-            if mailboxes[&to].send(msg).is_err() {
-                error!(
-                    logger,
-                    "send raft message to {} fail, let Raft retry it", to
-                );
+            let key = msg.to;
+            // devide the messages by the destination node.
+            msgs_group.entry(key).or_default().push(msg);
+        }
+        for (key, send_tx) in send_txs {
+            if let Some(value) = msgs_group.remove(key) {
+                send_tx.send(value).unwrap();
             }
         }
-    };
+    }
 
     if !ready.messages().is_empty() {
         // Send out the messages come from the node.
-        handle_messages(ready.take_messages());
+        handle_messages(ready.take_messages(), send_txs);
     }
 
     // Apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
@@ -396,7 +523,7 @@ fn on_ready(
 
     if !ready.persisted_messages().is_empty() {
         // Send out the persisted messages come from the node.
-        handle_messages(ready.take_persisted_messages());
+        handle_messages(ready.take_persisted_messages(), send_txs);
     }
 
     // Call `RawNode::advance` interface to update position flags in the raft.
@@ -406,7 +533,7 @@ fn on_ready(
         store.wl().mut_hard_state().set_commit(commit);
     }
     // Send out the messages.
-    handle_messages(light_rd.take_messages());
+    handle_messages(light_rd.take_messages(), send_txs);
     // Apply all committed entries.
     handle_committed_entries(raft_group, light_rd.take_committed_entries());
     // Advance the apply index.
