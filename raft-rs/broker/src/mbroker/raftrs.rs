@@ -493,7 +493,6 @@ fn on_ready(
                     let msg_id = deserialize_u32_le(entry.get_context()).unwrap();
                     let msg = MbMessage::from_bytes(&entry.data);
                     // コミット済みエントリのステートマシン適用前 107
-                    println!("raft_timer timing 107: context id {} & msg headr id {}",msg_id, msg.header.id);
                     raft_timer.lock().unwrap().append_ts(msg_id, RaftTimestampType::BeforeStateMachineApply, time_now());
                     let res = match msg.header.msg_type() {
                         MbMessageType::SendReq => {
