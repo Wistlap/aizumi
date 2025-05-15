@@ -107,8 +107,13 @@ impl From<&[u8]> for MessageHeader {
     }
 }
 
+/// Trait for enum that can be converted to `c_uint`
+pub trait RecordableType {
+    fn as_u32(&self) -> c_uint;
+}
+
 /// Message Type
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum MessageType {
     SendReq,
     SendAck,
@@ -169,5 +174,61 @@ impl TryFrom<c_uint> for MessageType {
 impl From<MessageType> for c_uint {
     fn from(msg_type: MessageType) -> Self {
         (msg_type as Self) + 1
+    }
+}
+
+impl RecordableType for MessageType {
+    fn as_u32(&self) -> c_uint {
+        *self as c_uint
+    }
+}
+
+/// Raft timestamp type
+/// 各要素は，あるメッセージにおける Raft 処理のタイミングを表す
+#[derive(Debug, Copy, Clone)]
+#[repr(u64)]
+pub enum RaftTimestampType {
+    BeforeProposalEnqueue = 101,  //プロポーズに追加前
+    BeforeLogAppend = 102,    // proposalsからのメッセージをRaftログに追加前
+    BeforeMessageSend = 103,  // 送信処理部にメッセージ受け渡し前
+    AfterRPCSent = 104, // RPC 送信後
+    AfterRPCReceived = 105,  // RPC 受信後
+    BeforeReceivedLogAppend = 106, // 受信部で受信したメッセージをRaftログに追加前
+    BeforeStateMachineApply = 107,    // コミット済みエントリのステートマシン適用前
+    AfterStateMachineApply = 108, // コミット済みエントリのステートマシン適用後
+    AfterRaftProcessComplete = 109,   // Raft処理終了後
+}
+
+impl TryFrom<c_uint> for RaftTimestampType {
+    type Error = io::Error;
+
+    fn try_from(value: c_uint) -> Result<Self, Self::Error> {
+        match value {
+            101 => Ok(RaftTimestampType::BeforeProposalEnqueue),
+            102 => Ok(RaftTimestampType::BeforeLogAppend),
+            103 => Ok(RaftTimestampType::BeforeMessageSend),
+            104 => Ok(RaftTimestampType::AfterRPCSent),
+            105 => Ok(RaftTimestampType::AfterRPCReceived),
+            106 => Ok(RaftTimestampType::BeforeReceivedLogAppend),
+            107 => Ok(RaftTimestampType::BeforeStateMachineApply),
+            108 => Ok(RaftTimestampType::AfterStateMachineApply),
+            109 => Ok(RaftTimestampType::AfterRaftProcessComplete),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid number for Raft Timestamp Type",
+            )),
+        }
+    }
+}
+
+impl From<RaftTimestampType> for c_uint {
+    fn from(msg_type: RaftTimestampType) -> Self {
+        msg_type as Self
+    }
+}
+
+impl RecordableType for RaftTimestampType {
+    fn as_u32(&self) -> c_uint {
+        *self as c_uint
     }
 }

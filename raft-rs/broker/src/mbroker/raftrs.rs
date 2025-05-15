@@ -20,8 +20,9 @@ use raft::{prelude::*, StateRole};
 
 use slog::{error, o};
 
+use super::timer::{time_now, RaftTimerStorage, TimerStorage};
 use super::is_ready_to_send;
-use super::message::Message as MbMessage;
+use super::message::{Message as MbMessage, RaftTimestampType};
 use super::message::MessageType as MbMessageType;
 use super::queue::{MQueue, MQueuePool};
 
@@ -165,6 +166,8 @@ fn run_node(
     proposals: Arc<Mutex<VecDeque<Proposal>>>,
     logger: slog::Logger,
 ){
+    let raft_timer = RaftTimerStorage::new();
+    let raft_timer = Arc::new(Mutex::new(raft_timer));
     // Channels for receiving messages from other nodes.
     let (recv_tx, recv_rx) = mpsc::channel();
     let mut send_txs: BTreeMap<u64, Sender<Vec<Message>>> = BTreeMap::new();
@@ -177,12 +180,14 @@ fn run_node(
             let recv_tx = recv_tx.clone();
             let (mut send_stream, mut recv_stream) = node.streams.remove(&key).unwrap();
             let logger_r = logger.clone();
+            let raft_timer_r = Arc::clone(&raft_timer);
             thread::spawn(move || {
-                treat_recv_stream( &mut recv_stream, recv_tx, logger_r);
+                treat_recv_stream( &mut recv_stream, recv_tx, logger_r, raft_timer_r);
             });
             let logger_s = logger.clone();
+            let raft_timer_s = Arc::clone(&raft_timer);
             thread::spawn(move || {
-                treat_send_stream( &mut send_stream, send_rx, logger_s);
+                treat_send_stream( &mut send_stream, send_rx, logger_s, raft_timer_s);
             });
         }
     }
@@ -192,7 +197,17 @@ fn run_node(
     loop {
         loop {
             match recv_rx.try_recv() {
-                Ok(msg) => node.step(msg, &logger),
+                Ok(msg) => {
+                    let msg_ids_opt = raft_timer.lock().unwrap().get_rmi(msg.get_term(), msg.get_index()).cloned();
+
+                    if let Some(msg_ids) = msg_ids_opt {
+                        for msg_id in msg_ids {
+                            // タイムスタンプ 受信部からの受け取り 106
+                            raft_timer.lock().unwrap().append_ts(msg_id, RaftTimestampType::BeforeReceivedLogAppend, time_now());
+                        }
+                    }
+                    node.step(msg, &logger)
+                },
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }
@@ -215,17 +230,22 @@ fn run_node(
             // Handle new proposals.
             let mut proposals = proposals.lock().unwrap();
             for p in proposals.iter_mut().skip_while(|p| p.proposed > 0) {
+                // TODO: タイムスタンプ ログの追加
+                // // key に対応するキューに挿入
+                // raft_timer.lock().unwrap().entry(msg.index).or_default().push((1, time_now()));
                 propose(raft_group, p);
             }
         }
 
+        let raft_timer_c = Arc::clone(&raft_timer);
         // Handle readies from the raft.
         on_ready(
             raft_group,
             Arc::clone(&node.mq_pool),
             &mut send_txs,
             &proposals,
-            &logger
+            &logger,
+            raft_timer_c,
         );
     }
 }
@@ -234,6 +254,7 @@ fn treat_recv_stream(
     recv_stream: &mut TcpStream,
     recv_tx: Sender<Message>,
     logger: slog::Logger,
+    raft_timer: Arc<Mutex<RaftTimerStorage>>
 ) {
     loop {
         // If there are messages received from other nodes, send it to the Raft node.
@@ -246,6 +267,15 @@ fn treat_recv_stream(
                 let msg = Message::parse_from_bytes(&buf);
                 if let Ok(msg) = msg {
                     debug!(logger, "{:?}", msg);
+
+                    let msg_ids_opt = raft_timer.lock().unwrap().get_rmi(msg.get_term(), msg.get_index()).cloned();
+
+                    if let Some(msg_ids) = msg_ids_opt {
+                        for msg_id in msg_ids {
+                            // タイムスタンプ RPC 受信後 105
+                            raft_timer.lock().unwrap().append_ts(msg_id, RaftTimestampType::AfterRPCReceived, time_now());
+                        }
+                    }
                     let _ = recv_tx.send(msg);
                 }
             },
@@ -261,6 +291,7 @@ fn treat_send_stream(
     send_stream: &mut TcpStream,
     send_rx: Receiver<Vec<Message>>,
     logger: slog::Logger,
+    raft_timer: Arc<Mutex<RaftTimerStorage>>
 ) {
     loop {
         // If there are messages to send to other nodes, send it.
@@ -282,6 +313,17 @@ fn treat_send_stream(
                     "send raft message to {} fail, let Raft retry it", to
                 );
             }
+            let term = msg.get_term();
+            let index = msg.get_index();
+            msg.entries
+                .iter()
+                .for_each(|entry| {
+                    if let Some(msg_id) = deserialize_u32_le(entry.get_context()) {
+                        // タイムスタンプ RPC 送信後 104
+                        raft_timer.lock().unwrap().append_ts(msg_id, RaftTimestampType::AfterRPCSent, time_now());
+                        raft_timer.lock().unwrap().append_rmi(term, index, msg_id);
+                    }
+                });
         }
     }
 }
@@ -381,6 +423,7 @@ fn on_ready(
     send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>,
     proposals: &Mutex<VecDeque<Proposal>>,
     logger: &slog::Logger,
+    raft_timer: Arc<Mutex<RaftTimerStorage>>,
 ) {
     if !raft_group.has_ready() {
         return;
@@ -390,9 +433,17 @@ fn on_ready(
     // Get the `Ready` with `RawNode::ready` interface.
     let mut ready = raft_group.ready();
 
-    fn handle_messages(msgs: Vec<Message>, send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>) {
+    fn handle_messages(msgs: Vec<Message>, send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>, raft_timer: Arc<Mutex<RaftTimerStorage>>) {
         let mut msgs_group: BTreeMap<u64, Vec<Message>> = BTreeMap::new();
         for msg in msgs {
+            msg.entries
+                .iter()
+                .for_each(|entry| {
+                    if let Some(msg_id) = deserialize_u32_le(entry.get_context()) {
+                        // タイムスタンプ 送信部にメッセージ受け渡し前 103
+                        raft_timer.lock().unwrap().append_ts(msg_id, RaftTimestampType::BeforeMessageSend, time_now());
+                    }
+                });
             let key = msg.to;
             // devide the messages by the destination node.
             msgs_group.entry(key).or_default().push(msg);
@@ -406,7 +457,7 @@ fn on_ready(
 
     if !ready.messages().is_empty() {
         // Send out the messages come from the node.
-        handle_messages(ready.take_messages(), send_txs);
+        handle_messages(ready.take_messages(), send_txs, Arc::clone(&raft_timer));
     }
 
     // Apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
@@ -438,8 +489,12 @@ fn on_ready(
                 } else {
                     // For normal proposals, extract the key-value pair and then
                     // insert them into the kv engine.
-                    let msg = MbMessage::from_bytes(&entry.data);
 
+                    let msg_id = deserialize_u32_le(entry.get_context()).unwrap();
+                    let msg = MbMessage::from_bytes(&entry.data);
+                    // コミット済みエントリのステートマシン適用前 107
+                    println!("raft_timer timing 107: context id {} & msg headr id {}",msg_id, msg.header.id);
+                    raft_timer.lock().unwrap().append_ts(msg_id, RaftTimestampType::BeforeStateMachineApply, time_now());
                     let res = match msg.header.msg_type() {
                         MbMessageType::SendReq => {
                             let mut mq_pool = mq_pool.write().unwrap();
@@ -506,13 +561,18 @@ fn on_ready(
                             None
                         }
                     };
+                    // コミット済みエントリのステートマシン適用後 108
+                    raft_timer.lock().unwrap().append_ts(msg_id, RaftTimestampType::AfterStateMachineApply, time_now());
                     res
                 };
                 if rn.raft.state == StateRole::Leader {
                     // The leader should response to the clients, tell them if their proposals
                     // succeeded or not.
                     let proposal = proposals.lock().unwrap().pop_front().unwrap();
-                    proposal.propose_success.send(res).unwrap();
+                    match deserialize_u32_le(&entry.context) {
+                        Some(msg_id) => proposal.propose_success.send((res, raft_timer.lock().unwrap().take_ts(msg_id))).unwrap(),
+                        None => proposal.propose_success.send((res, None)).unwrap()
+                    }
                 }
             }
         };
@@ -536,7 +596,7 @@ fn on_ready(
 
     if !ready.persisted_messages().is_empty() {
         // Send out the persisted messages come from the node.
-        handle_messages(ready.take_persisted_messages(), send_txs);
+        handle_messages(ready.take_persisted_messages(), send_txs, Arc::clone(&raft_timer));
     }
 
     // Call `RawNode::advance` interface to update position flags in the raft.
@@ -546,7 +606,7 @@ fn on_ready(
         store.wl().mut_hard_state().set_commit(commit);
     }
     // Send out the messages.
-    handle_messages(light_rd.take_messages(), send_txs);
+    handle_messages(light_rd.take_messages(), send_txs, Arc::clone(&raft_timer));
     // Apply all committed entries.
     handle_committed_entries(raft_group, light_rd.take_committed_entries());
     // Advance the apply index.
@@ -576,11 +636,13 @@ pub struct Proposal {
     transfer_leader: Option<u64>,
     // If it's proposed, it will be set to the index of the entry.
     proposed: u64,
-    propose_success: SyncSender<Option<MbMessage>>,
+    propose_success: SyncSender<ProposalData>,
 }
 
+type ProposalData = (Option<MbMessage>, Option<TimerStorage>);
+
 impl Proposal {
-    fn conf_change(cc: &ConfChange) -> (Self, Receiver<Option<MbMessage>>) {
+    fn conf_change(cc: &ConfChange) -> (Self, Receiver<ProposalData>) {
         let (tx, rx) = mpsc::sync_channel(1);
         let proposal = Proposal {
             normal: None,
@@ -592,7 +654,7 @@ impl Proposal {
         (proposal, rx)
     }
 
-    pub fn normal(msg:MbMessage) -> (Self, Receiver<Option<MbMessage>>) {
+    pub fn normal(msg:MbMessage) -> (Self, Receiver<ProposalData>) {
         let (tx, rx) = mpsc::sync_channel(1);
         let proposal = Proposal {
             normal: Some(msg),
@@ -610,8 +672,9 @@ fn propose(raft_group: &mut RawNode<MemStorage>, proposal: &mut Proposal) {
     {
         let proposal = proposal.clone();
         if let Some(mut msg) = proposal.normal {
+            let context = serialize_u32_le(msg.header.id);
             let data = msg.to_bytes();
-            let _ = raft_group.propose(vec![], data.to_vec());
+            let _ = raft_group.propose(context.to_vec(), data.to_vec());
         } else if let Some(ref cc) = proposal.conf_change {
             let _ = raft_group.propose_conf_change(vec![], cc.clone());
         } else if let Some(_transferee) = proposal.transfer_leader {
@@ -623,7 +686,7 @@ fn propose(raft_group: &mut RawNode<MemStorage>, proposal: &mut Proposal) {
     let last_index2 = raft_group.raft.raft_log.last_index() + 1;
     if last_index2 == last_index1 {
         // Propose failed, don't forget to respond to the client.
-        proposal.propose_success.send(None).unwrap();
+        proposal.propose_success.send((None, None)).unwrap();
         // proposal.propose_success.send(false).unwrap();
     } else {
         proposal.proposed = last_index1;
@@ -639,10 +702,24 @@ fn add_all_followers(proposals: &Mutex<VecDeque<Proposal>>, num_nodes: u64) {
         loop {
             let (proposal, rx) = Proposal::conf_change(&conf_change);
             proposals.lock().unwrap().push_back(proposal);
-            if rx.recv().unwrap().is_none() {
+            if rx.recv().unwrap().0.is_none() {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+/// u32 をリトルエンディアンのバイト列に変換
+fn serialize_u32_le(value: u32) -> [u8; 4] {
+    value.to_le_bytes()
+}
+
+/// リトルエンディアンのバイト列から u32 を復元
+fn deserialize_u32_le(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() >= 4 {
+        Some(u32::from_le_bytes(bytes[0..4].try_into().unwrap()))
+    } else {
+        None
     }
 }

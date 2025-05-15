@@ -1,6 +1,7 @@
-use super::MessageType;
+use super::message::{RaftTimestampType, RecordableType};
 use core::arch::x86_64::_rdtsc;
-use std::{ffi::c_uint, fmt::Display, io::Write};
+use std::{collections::BTreeMap, ffi::c_uint, fmt::Display, io::Write};
+
 
 #[derive(Debug)]
 pub struct TimerStorage {
@@ -19,9 +20,16 @@ impl TimerStorage {
         Self { record: Vec::new() }
     }
 
-    pub fn append(&mut self, msg_id: c_uint, msg_type: MessageType, tsc: u64) {
+    pub fn append<T>(&mut self, msg_id: c_uint, msg_type: T, tsc: u64)
+    where
+        T: RecordableType,
+    {
         let new_record = TimerRecord::new(msg_id, msg_type, tsc);
         self.record.push(new_record);
+    }
+
+    pub fn merge_from(&mut self, mut other: TimerStorage) {
+        self.record.append(&mut other.record);
     }
 
     pub fn len(&self) -> usize {
@@ -38,10 +46,13 @@ impl TimerStorage {
 }
 
 impl TimerRecord {
-    fn new(msg_id: c_uint, msg_type: MessageType, tsc: u64) -> Self {
+    fn new<T>(msg_id: c_uint, msg_type: T, tsc: u64) -> Self
+    where
+        T: RecordableType,
+    {
         Self {
             msg_id,
-            msg_type: msg_type.into(),
+            msg_type: msg_type.as_u32(),
             tsc,
         }
     }
@@ -55,4 +66,46 @@ impl Display for TimerRecord {
 
 pub fn time_now() -> u64 {
     unsafe { _rdtsc() }
+}
+
+pub struct RaftTimerStorage {
+    timestamps: BTreeMap<c_uint, TimerStorage>, // msg_id -> [(event, timestamp)]
+    raft_msg_ids: BTreeMap<(u64, u64), Vec<c_uint>>, // (term, index) -> timestamp
+}
+
+impl RaftTimerStorage {
+    pub fn new() -> Self {
+        Self {
+            timestamps: BTreeMap::new(),
+            raft_msg_ids: BTreeMap::new(),
+        }
+    }
+
+    pub fn append_ts(&mut self, msg_id: c_uint, msg_type: RaftTimestampType, tsc: u64){
+        let new_record = TimerRecord::new(msg_id, msg_type, tsc);
+        self
+            .timestamps
+            .entry(msg_id)
+            .or_insert_with(TimerStorage::new)
+            .record
+            .push(new_record);
+    }
+
+    pub fn take_ts(&mut self, msg_id: c_uint) -> Option<TimerStorage> {
+        self.timestamps.remove(&msg_id)
+    }
+
+    pub fn append_rmi(&mut self, term: u64, index: u64, msg_id: c_uint){
+        self.raft_msg_ids
+            .entry((term, index))
+            .or_default()
+            .push(msg_id);
+    }
+
+    pub fn get_rmi(&self, term: u64, index: u64) -> Option<&Vec<c_uint>> {
+        self.raft_msg_ids.get(&(term, index))
+    }
+    pub fn take_rmi(&mut self, term: u64, index: u64) -> Option<Vec<c_uint>> {
+        self.raft_msg_ids.remove(&(term, index))
+    }
 }

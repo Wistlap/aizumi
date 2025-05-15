@@ -10,7 +10,7 @@ mod timer;
 pub mod raftrs;
 
 // use log::*;
-use message::{Message, MessageHeader, MessageType};
+use message::{Message, MessageHeader, MessageType, RaftTimestampType};
 use network::{NetService, NetStream};
 use nix::sys::epoll::*;
 use queue::{MQueue, MQueuePool};
@@ -185,17 +185,22 @@ fn treat_client(
             match stream.recv_msg() {
                 Ok(mut msg) => match msg.header.msg_type() {
                     MessageType::SendReq => {
-                        // TODO: Raftによる処理を追加
-                        let src_msg_id = msg.header.id;
-                        timer.append(src_msg_id, msg.header.msg_type(), time_now()); //1
+                        let tsc = time_now();
                         let mut ack = into_normal_ack(msg.clone(), myid);
                         msg.header.id = get_msg_id(Arc::clone(&msg_id));
+                        timer.append(msg.header.id, msg.header.msg_type(), tsc); //1
 
                         let (proposal, rx) = Proposal::normal(msg.clone());
+                        // タイムスタンプ Raftにメッセージ譲渡 101
+                        timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                         proposals.lock().unwrap().push_back(proposal);
-                        rx.recv().unwrap();
-                        timer.append(src_msg_id, ack.header.msg_type(), time_now()); //2
-                        // println!("consensus result(SendReq): {:?}", res.header);
+                        let (_, raft_timers) = rx.recv().unwrap();
+                        if let Some(raft_timers) = raft_timers {
+                            timer.merge_from(raft_timers);
+                        }
+                        // Raft 処理終了後 109
+                        timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+
                         stream.send_msg(&mut ack).unwrap();
                         _counter += 1;
                     }
@@ -204,23 +209,36 @@ fn treat_client(
                     }
                     MessageType::FreeReq => {
                         let (proposal, rx) = Proposal::normal(msg.clone());
+                        // タイムスタンプ Raftにメッセージ譲渡 101
+                        timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                         proposals.lock().unwrap().push_back(proposal);
-                        rx.recv().unwrap();
+                        let (_, raft_timers) = rx.recv().unwrap();
+                        if let Some(raft_timers) = raft_timers {
+                            timer.merge_from(raft_timers);
+                        }
+                        // Raft 処理終了後 109
+                        timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+
                         stream.send_msg(&mut into_normal_ack(msg.clone(), myid)).unwrap();
 
                         if is_ready_to_send(&mq_pool.read().unwrap().find_by_id(msg.header.saddr).unwrap().clone().read().unwrap()) {
                             msg.header.change_msg_type(MessageType::PushReq);
+
                             let (proposal, rx) = Proposal::normal(msg.clone());
-                            let tsc = time_now();
+                            // // タイムスタンプ Raftにメッセージ譲渡 101
+                            // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                             proposals.lock().unwrap().push_back(proposal);
-                            // After we got a response from `rx`, we can assume the put succeeded and following
-                            // `get` operations can find the key-value pair.
-                            let mut res = match rx.recv().unwrap() {
+                            let (res, _raft_timers) = rx.recv().unwrap();
+                            let mut res = match res {
                                 Some(msg) => msg,
                                 None => continue,
                             };
-                            // println!("consensus result(FreeReq): {:?}", res.header);
-                            timer.append(res.header.id, res.header.msg_type().ack().unwrap(), tsc); //8
+                            // if let Some(raft_timers) = raft_timers {
+                            //     timer.merge_from(raft_timers);
+                            // }
+                            // // Raft 処理終了後 109
+                            // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+
                             timer.append(res.header.id, res.header.msg_type(), time_now()); //7
                             stream.send_msg(&mut res).unwrap();
                         }
@@ -230,9 +248,15 @@ fn treat_client(
                     }
                     MessageType::HeloReq => {
                         let (proposal, rx) = Proposal::normal(msg.clone());
+                        // // タイムスタンプ Raftにメッセージ譲渡 101
+                        // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                         proposals.lock().unwrap().push_back(proposal);
-                        rx.recv().unwrap();
-                        // println!("consensus result(HeloReq): {:?}", res.header);
+                        let (_, _raft_timers) = rx.recv().unwrap();
+                        // if let Some(raft_timers) = raft_timers {
+                        //     timer.merge_from(raft_timers);
+                        // }
+                        // // Raft 処理終了後 109
+                        // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
                         client_id = msg.header.saddr;
                         let mut ack = into_normal_ack(msg, myid);
@@ -260,18 +284,26 @@ fn treat_client(
             if let Some(mqueue) = mqueue {
                 // let mut mqueue = mqueue.write().unwrap();
                 if is_ready_to_send(&mqueue.read().unwrap()) {
+                    // FIXME: 毎回異なるidで作成されるべき
+                    // id 0 のメッセージが複数作られるため，Raftの 処理時間の算出に影響する
                     let msg = Message::new(MessageHeader::new(MessageType::PushReq, client_id as c_uint, 0 as c_uint, 0 as c_uint));
-                let (proposal, rx) = Proposal::normal(msg.clone());
-                let tsc = time_now();
-                proposals.lock().unwrap().push_back(proposal);
-                let mut res = match rx.recv().unwrap() {
-                    Some(msg) => msg,
-                    None => continue,
-                };
-                // println!("consensus result(Timeout): {:?}", res.header);
-                timer.append(res.header.id, res.header.msg_type().ack().unwrap(),tsc); //8
-                timer.append(res.header.id, res.header.msg_type(), time_now()); //7
-                stream.send_msg(&mut res).unwrap();
+                    let (proposal, rx) = Proposal::normal(msg.clone());
+                    // // タイムスタンプ Raftにメッセージ譲渡 101
+                    // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
+                    proposals.lock().unwrap().push_back(proposal);
+                    let (res, _raft_timers) = rx.recv().unwrap();
+                    let mut res = match res {
+                        Some(msg) => msg,
+                        None => continue,
+                    };
+                    // if let Some(raft_timers) = raft_timers {
+                    //     timer.merge_from(raft_timers);
+                    // }
+                    // // Raft 処理終了後 109
+                    // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+
+                    timer.append(res.header.id, res.header.msg_type(), time_now()); //7
+                    stream.send_msg(&mut res).unwrap();
                 }
             }
             _counter += 1;
