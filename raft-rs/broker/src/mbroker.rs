@@ -209,15 +209,15 @@ fn treat_client(
                     }
                     MessageType::FreeReq => {
                         let (proposal, rx) = Proposal::normal(msg.clone());
-                        // タイムスタンプ Raftにメッセージ譲渡 101
-                        timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
+                        // // タイムスタンプ Raftにメッセージ譲渡 101
+                        // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                         proposals.lock().unwrap().push_back(proposal);
-                        let (_, raft_timers) = rx.recv().unwrap();
-                        if let Some(raft_timers) = raft_timers {
-                            timer.merge_from(raft_timers);
-                        }
-                        // Raft 処理終了後 109
-                        timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+                        let (_, _raft_timers) = rx.recv().unwrap();
+                        // if let Some(raft_timers) = raft_timers {
+                        //     timer.merge_from(raft_timers);
+                        // }
+                        // // Raft 処理終了後 109
+                        // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
                         stream.send_msg(&mut into_normal_ack(msg.clone(), myid)).unwrap();
 

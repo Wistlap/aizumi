@@ -70,18 +70,16 @@ pub fn time_now() -> u64 {
 
 pub struct RaftTimerStorage {
     timestamps: BTreeMap<c_uint, TimerStorage>, // msg_id -> [(event, timestamp)]
-    raft_msg_ids: BTreeMap<(u64, u64), Vec<c_uint>>, // (term, index) -> timestamp
 }
 
 impl RaftTimerStorage {
     pub fn new() -> Self {
         Self {
             timestamps: BTreeMap::new(),
-            raft_msg_ids: BTreeMap::new(),
         }
     }
 
-    pub fn append_ts(&mut self, msg_id: c_uint, msg_type: RaftTimestampType, tsc: u64){
+    pub fn append(&mut self, msg_id: c_uint, msg_type: RaftTimestampType, tsc: u64){
         let new_record = TimerRecord::new(msg_id, msg_type, tsc);
         self
             .timestamps
@@ -91,21 +89,7 @@ impl RaftTimerStorage {
             .push(new_record);
     }
 
-    pub fn take_ts(&mut self, msg_id: c_uint) -> Option<TimerStorage> {
+    pub fn take(&mut self, msg_id: c_uint) -> Option<TimerStorage> {
         self.timestamps.remove(&msg_id)
-    }
-
-    pub fn append_rmi(&mut self, term: u64, index: u64, msg_id: c_uint){
-        self.raft_msg_ids
-            .entry((term, index))
-            .or_default()
-            .push(msg_id);
-    }
-
-    pub fn get_rmi(&self, term: u64, index: u64) -> Option<&Vec<c_uint>> {
-        self.raft_msg_ids.get(&(term, index))
-    }
-    pub fn take_rmi(&mut self, term: u64, index: u64) -> Option<Vec<c_uint>> {
-        self.raft_msg_ids.remove(&(term, index))
     }
 }
