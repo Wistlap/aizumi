@@ -5,7 +5,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use nix::sys::socket::{setsockopt, sockopt};
-use slog::{debug, warn, Drain};
+use slog::{debug, Drain};
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -200,7 +200,7 @@ fn run_node(
             match recv_rx.try_recv() {
                 Ok(msg) => {
                     if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
-                        warn!(logger, "MsgAppendResponse: {:?}", msg_ids);
+                        debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
                         for msg_id in msg_ids {
                             // タイムスタンプ 受信部からの受け取り 106
                         raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::BeforeReceivedLogAppend, time_now());
