@@ -433,21 +433,23 @@ fn on_ready(
     fn handle_messages(msgs: Vec<Message>, send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>, raft_timer: Arc<Mutex<RaftTimerStorage>>) {
         let mut msgs_group: BTreeMap<u64, Vec<Message>> = BTreeMap::new();
         for msg in msgs {
-            msg.entries
-                .iter()
-                .for_each(|entry| {
-                    if let Some(msg_id) = le_bytes_to_u32(entry.get_context()) {
-                        // タイムスタンプ 送信部にメッセージ受け渡し前 103
-                        raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::BeforeMessageSend, time_now());
-                    }
-                });
             let key = msg.to;
             // devide the messages by the destination node.
             msgs_group.entry(key).or_default().push(msg);
         }
         for (key, send_tx) in send_txs {
-            if let Some(value) = msgs_group.remove(key) {
-                send_tx.send(value).unwrap();
+            if let Some(msgs) = msgs_group.remove(key) {
+                for msg in msgs.iter() {
+                    msg.entries
+                        .iter()
+                        .for_each(|entry| {
+                            if let Some(msg_id) = le_bytes_to_u32(entry.get_context()) {
+                                // タイムスタンプ 送信部にメッセージ受け渡し前 103
+                                raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::BeforeMessageSend, time_now());
+                            }
+                        });
+                }
+                send_tx.send(msgs).unwrap();
             }
         }
     }
