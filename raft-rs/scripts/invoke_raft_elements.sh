@@ -16,7 +16,7 @@ function is_receiver_working() {
 TOPDIR=$(dirname "$0")
 
 # 位置パラメータへの設定
-args=$(getopt -o r:s: -- "$@") || exit 1
+args=$(getopt -o r:s:n: -- "$@") || exit 1
 eval "set -- $args"
 
 while [ $# -gt 0 ]; do
@@ -27,6 +27,9 @@ while [ $# -gt 0 ]; do
     -s)
         OPT_N_SENDERS=$2;
         shift 2   ;;
+    -n)
+        OPT_N_NODES=$2;
+        shift 2   ;;
     '--')
         shift;
         break ;;
@@ -34,7 +37,10 @@ while [ $# -gt 0 ]; do
 done
 
 # mandatory option check
-if [ -z "$OPT_N_RECEIVERS" ] || [ -z "$OPT_N_SENDERS" ]; then
+if [ -z "$OPT_N_RECEIVERS" ] || [ -z "$OPT_N_SENDERS" ] || [ -z "$OPT_N_NODES" ]; then
+    echo "Usage: $0 -r <number of receivers> -s <number of senders> -n <number of nodes>"
+    echo "Example: $0 -r 10 -s 10 -n 3"
+    echo "This script requires the number of receivers, senders, and nodes to be specified."
   exit 1
 fi
 
@@ -52,6 +58,7 @@ BROKER_PORT=5555
 DEBUG_LEVEL=3
 NUM_RECEIVERS="$OPT_N_RECEIVERS"
 NUM_SENDERS="$OPT_N_SENDERS"
+NUM_NODES="$OPT_N_NODES"
 
 date=$(date +"%Y%m%d-%H%M%S")
 
@@ -61,13 +68,21 @@ BROKERS_IP=(
     "127.0.0.1:5555"
     "127.0.0.1:5556"
     "127.0.0.1:5557"
+    "127.0.0.1:5558"
+    "127.0.0.1:5559"
+    "127.0.0.1:5560"
+    "127.0.0.1:5561"
+    "127.0.0.1:5562"
+    "127.0.0.1:5563"
+    "127.0.0.1:5564"
 )
-num_nodes=${#BROKERS_IP[@]}
+
+num_nodes=${NUM_NODES}
 for i in $(seq 2 $num_nodes)
 do
     ip=$BROKER_ADDR$(expr $BROKER_PORT + $i - 1)
     echo "$BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}""
-    $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}"&
+    # $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}"&
 done
 sleep 4
 
@@ -75,7 +90,7 @@ num_messages=$(expr $MESSAGE_COUNT / $NUM_RECEIVERS)
 for i in $(seq 1 $NUM_RECEIVERS)
 do
     myid=$(expr $FIRST_RECEIVER_ID + $i - 1)
-    $RECEIVER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL &
+    # $RECEIVER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL &
 done
 last_receiver_id=$myid
 sleep 4
@@ -84,7 +99,7 @@ num_messages=$(expr $MESSAGE_COUNT / $NUM_RECEIVERS / $NUM_SENDERS)
 for i in $(seq 1 $NUM_SENDERS)
 do
     myid=$(expr $FIRST_SENDER_ID + $i - 1)
-    $SENDER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL $FIRST_RECEIVER_ID-$last_receiver_id &
+    # $SENDER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL $FIRST_RECEIVER_ID-$last_receiver_id &
 done
 
 while is_receiver_working
