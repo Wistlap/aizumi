@@ -179,7 +179,7 @@ impl From<MessageType> for c_uint {
 
 impl RecordableType for MessageType {
     fn as_u32(&self) -> c_uint {
-        *self as c_uint
+        (*self as c_uint) + 1
     }
 }
 
