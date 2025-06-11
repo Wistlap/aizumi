@@ -199,11 +199,12 @@ fn run_node(
         loop {
             match recv_rx.try_recv() {
                 Ok(msg) => {
+                    let from = msg.from;
                     if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
                         debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
                         for msg_id in msg_ids {
                             // タイムスタンプ 受信部からの受け取り 106
-                        raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::BeforeReceivedLogAppend, time_now());
+                        raft_timer.lock().unwrap().append(msg_id, from as u32, RaftTimestampType::BeforeReceivedLogAppend, time_now());
                         }
                     }
                     node.step(msg, &logger)
@@ -270,9 +271,10 @@ fn treat_recv_stream(
 
                     if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
                         debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
+                        let node_id = msg.from;
                         for msg_id in msg_ids {
                             // タイムスタンプ RPC 受信後 105
-                            raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::AfterRPCReceived, time_now());
+                            raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::AfterRPCReceived, time_now());
                         }
                     }
 
@@ -318,7 +320,7 @@ fn treat_send_stream(
                 .for_each(|entry| {
                     if let Some(msg_id) = le_bytes_to_u32(entry.get_context()) {
                         // タイムスタンプ RPC 送信後 104
-                        raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::AfterRPCSent, time_now());
+                        raft_timer.lock().unwrap().append(msg_id, to as u32, RaftTimestampType::AfterRPCSent, time_now());
                     }
                 });
         }
@@ -440,12 +442,13 @@ fn on_ready(
         for (key, send_tx) in send_txs {
             if let Some(msgs) = msgs_group.remove(key) {
                 for msg in msgs.iter() {
+                    let to = msg.to;
                     msg.entries
                         .iter()
                         .for_each(|entry| {
                             if let Some(msg_id) = le_bytes_to_u32(entry.get_context()) {
                                 // タイムスタンプ 送信部にメッセージ受け渡し前 103
-                                raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::BeforeMessageSend, time_now());
+                                raft_timer.lock().unwrap().append(msg_id, to as u32, RaftTimestampType::BeforeMessageSend, time_now());
                             }
                         });
                 }
@@ -488,11 +491,11 @@ fn on_ready(
                 } else {
                     // For normal proposals, extract the key-value pair and then
                     // insert them into the kv engine.
-
+                    let node_id = rn.raft.id;
                     let msg_id = le_bytes_to_u32(entry.get_context()).unwrap();
                     let msg = MbMessage::from_bytes(&entry.data);
                     // コミット済みエントリのステートマシン適用前 107
-                    raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::BeforeStateMachineApply, time_now());
+                    raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::BeforeStateMachineApply, time_now());
                     let res = match msg.header.msg_type() {
                         MbMessageType::SendReq => {
                             let mut mq_pool = mq_pool.write().unwrap();
@@ -560,7 +563,7 @@ fn on_ready(
                         }
                     };
                     // コミット済みエントリのステートマシン適用後 108
-                    raft_timer.lock().unwrap().append(msg_id, RaftTimestampType::AfterStateMachineApply, time_now());
+                    raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::AfterStateMachineApply, time_now());
                     res
                 };
                 if rn.raft.state == StateRole::Leader {

@@ -11,6 +11,7 @@ pub struct TimerStorage {
 #[derive(Debug)]
 struct TimerRecord {
     msg_id: c_uint,
+    node_id: c_uint, // For logging raft messages
     msg_type: c_uint,
     tsc: u64,
 }
@@ -20,11 +21,11 @@ impl TimerStorage {
         Self { record: Vec::new() }
     }
 
-    pub fn append<T>(&mut self, msg_id: c_uint, msg_type: T, tsc: u64)
+    pub fn append<T>(&mut self, msg_id: c_uint, node_id: c_uint, msg_type: T, tsc: u64)
     where
         T: RecordableType,
     {
-        let new_record = TimerRecord::new(msg_id, msg_type, tsc);
+        let new_record = TimerRecord::new(msg_id, node_id, msg_type, tsc);
         self.record.push(new_record);
     }
 
@@ -46,12 +47,13 @@ impl TimerStorage {
 }
 
 impl TimerRecord {
-    fn new<T>(msg_id: c_uint, msg_type: T, tsc: u64) -> Self
+    fn new<T>(msg_id: c_uint, node_id: c_uint, msg_type: T, tsc: u64) -> Self
     where
         T: RecordableType,
     {
         Self {
             msg_id,
+            node_id,
             msg_type: msg_type.as_u32(),
             tsc,
         }
@@ -60,7 +62,7 @@ impl TimerRecord {
 
 impl Display for TimerRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{},{},{}", self.msg_id, self.msg_type, self.tsc)
+        write!(f, "{},{},{},{}", self.msg_id, self.node_id, self.msg_type, self.tsc)
     }
 }
 
@@ -79,8 +81,8 @@ impl RaftTimerStorage {
         }
     }
 
-    pub fn append(&mut self, msg_id: c_uint, msg_type: RaftTimestampType, tsc: u64){
-        let new_record = TimerRecord::new(msg_id, msg_type, tsc);
+    pub fn append(&mut self, msg_id: c_uint, node_id: c_uint, msg_type: RaftTimestampType, tsc: u64){
+        let new_record = TimerRecord::new(msg_id, node_id, msg_type, tsc);
         self
             .timestamps
             .entry(msg_id)
