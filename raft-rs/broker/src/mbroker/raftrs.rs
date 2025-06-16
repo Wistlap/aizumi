@@ -255,7 +255,7 @@ fn treat_recv_stream(
     recv_stream: &mut TcpStream,
     recv_tx: Sender<Message>,
     logger: slog::Logger,
-    raft_timer: Arc<Mutex<RaftTimerStorage>>
+    _raft_timer: Arc<Mutex<RaftTimerStorage>>
 ) {
     loop {
         // If there are messages received from other nodes, send it to the Raft node.
@@ -269,14 +269,14 @@ fn treat_recv_stream(
                 if let Ok(msg) = msg {
                     debug!(logger, "{:?}", msg);
 
-                    if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
-                        debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
-                        let node_id = msg.from;
-                        for msg_id in msg_ids {
-                            // タイムスタンプ RPC 受信後 105
-                            raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::AfterRPCReceived, time_now());
-                        }
-                    }
+                    // if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
+                    //     debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
+                    //     let node_id = msg.from;
+                    //     for msg_id in msg_ids {
+                    //         // タイムスタンプ RPC 受信後 105
+                    //         raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::AfterRPCReceived, time_now());
+                    //     }
+                    // }
 
                     let _ = recv_tx.send(msg);
                 }
@@ -491,11 +491,11 @@ fn on_ready(
                 } else {
                     // For normal proposals, extract the key-value pair and then
                     // insert them into the kv engine.
-                    let node_id = rn.raft.id;
-                    let msg_id = le_bytes_to_u32(entry.get_context()).unwrap();
+                    // let node_id = rn.raft.id;
+                    // let msg_id = le_bytes_to_u32(entry.get_context()).unwrap();
                     let msg = MbMessage::from_bytes(&entry.data);
-                    // コミット済みエントリのステートマシン適用前 107
-                    raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::BeforeStateMachineApply, time_now());
+                    // // コミット済みエントリのステートマシン適用前 107
+                    // raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::BeforeStateMachineApply, time_now());
                     let res = match msg.header.msg_type() {
                         MbMessageType::SendReq => {
                             let mut mq_pool = mq_pool.write().unwrap();
@@ -562,8 +562,8 @@ fn on_ready(
                             None
                         }
                     };
-                    // コミット済みエントリのステートマシン適用後 108
-                    raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::AfterStateMachineApply, time_now());
+                    // // コミット済みエントリのステートマシン適用後 108
+                    // raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::AfterStateMachineApply, time_now());
                     res
                 };
                 if rn.raft.state == StateRole::Leader {
