@@ -82,7 +82,7 @@ for i in $(seq 2 $num_nodes)
 do
     ip=$BROKER_ADDR$(expr $BROKER_PORT + $i - 1)
     echo "$BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}""
-    # $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}"&
+    $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}"&
 done
 sleep 4
 
@@ -90,7 +90,7 @@ num_messages=$(expr $MESSAGE_COUNT / $NUM_RECEIVERS)
 for i in $(seq 1 $NUM_RECEIVERS)
 do
     myid=$(expr $FIRST_RECEIVER_ID + $i - 1)
-    # $RECEIVER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL &
+    $RECEIVER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL &
 done
 last_receiver_id=$myid
 sleep 4
@@ -99,7 +99,7 @@ num_messages=$(expr $MESSAGE_COUNT / $NUM_RECEIVERS / $NUM_SENDERS)
 for i in $(seq 1 $NUM_SENDERS)
 do
     myid=$(expr $FIRST_SENDER_ID + $i - 1)
-    # $SENDER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL $FIRST_RECEIVER_ID-$last_receiver_id &
+    $SENDER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL $FIRST_RECEIVER_ID-$last_receiver_id &
 done
 
 while is_receiver_working
