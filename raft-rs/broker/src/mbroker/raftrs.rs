@@ -618,6 +618,8 @@ fn example_config() -> Config {
     Config {
         election_tick: 30,
         heartbeat_tick: 3,
+        max_size_per_msg: 1024 * 1024,
+        batch_append: true,
         ..Default::default()
     }
 }
