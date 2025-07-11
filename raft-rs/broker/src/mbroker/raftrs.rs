@@ -13,6 +13,7 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::thread;
+use std::ops::DerefMut;
 
 
 use protobuf::Message as PbMessage;
@@ -33,7 +34,8 @@ pub fn start_raft(
     proposals: Arc<Mutex<VecDeque<Proposal>>>,
     mq_pool: Arc<RwLock<MQueuePool>>,
     my_address: String,
-    raft_addresses: Vec<String>
+    raft_addresses: Vec<String>,
+    log_target: Arc<Mutex<Box<dyn Write + Send>>>
 ) {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -149,7 +151,7 @@ pub fn start_raft(
     let proposals_clone = Arc::clone(&proposals);
     let logger = logger.clone();
     // Here we spawn the node on a new thread and keep a handle so we can join on them later.
-    let handle = thread::spawn(move || run_node(node, proposals_clone,  logger));
+    let handle = thread::spawn(move || run_node(node, proposals_clone,  logger, log_target));
 
     // Propose some conf changes so that followers can be initialized.
     let proposals = Arc::clone(&proposals);
@@ -166,6 +168,7 @@ fn run_node(
     mut node: Node,
     proposals: Arc<Mutex<VecDeque<Proposal>>>,
     logger: slog::Logger,
+    log_target: Arc<Mutex<Box<dyn Write + Send>>>
 ){
     let raft_timer = RaftTimerStorage::new();
     let raft_timer = Arc::new(Mutex::new(raft_timer));
@@ -202,9 +205,10 @@ fn run_node(
                     let from = msg.from;
                     if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
                         debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
+                        let mut timer = raft_timer.lock().unwrap();
                         for msg_id in msg_ids {
                             // タイムスタンプ 受信部からの受け取り 106
-                        raft_timer.lock().unwrap().append(msg_id, from as u32, RaftTimestampType::BeforeReceivedLogAppend, time_now());
+                            timer.append(msg_id, from as u32, RaftTimestampType::BeforeReceivedLogAppend, time_now());
                         }
                     }
                     node.step(msg, &logger)
@@ -247,6 +251,7 @@ fn run_node(
             &proposals,
             &logger,
             raft_timer_c,
+            Arc::clone(&log_target)
         );
     }
 }
@@ -255,7 +260,7 @@ fn treat_recv_stream(
     recv_stream: &mut TcpStream,
     recv_tx: Sender<Message>,
     logger: slog::Logger,
-    _raft_timer: Arc<Mutex<RaftTimerStorage>>
+    raft_timer: Arc<Mutex<RaftTimerStorage>>
 ) {
     loop {
         // If there are messages received from other nodes, send it to the Raft node.
@@ -269,14 +274,14 @@ fn treat_recv_stream(
                 if let Ok(msg) = msg {
                     debug!(logger, "{:?}", msg);
 
-                    // if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
-                    //     debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
-                    //     let node_id = msg.from;
-                    //     for msg_id in msg_ids {
-                    //         // タイムスタンプ RPC 受信後 105
-                    //         raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::AfterRPCReceived, time_now());
-                    //     }
-                    // }
+                    if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
+                        let node_id = msg.from;
+                        let mut timer = raft_timer.lock().unwrap();
+                        for msg_id in msg_ids {
+                            // タイムスタンプ RPC 受信後 105
+                            timer.append(msg_id, node_id as u32, RaftTimestampType::AfterRPCReceived, time_now());
+                        }
+                    }
 
                     let _ = recv_tx.send(msg);
                 }
@@ -315,14 +320,14 @@ fn treat_send_stream(
                     "send raft message to {} fail, let Raft retry it", to
                 );
             }
-            msg.entries
-                .iter()
-                .for_each(|entry| {
-                    if let Some(msg_id) = le_bytes_to_u32(entry.get_context()) {
-                        // タイムスタンプ RPC 送信後 104
-                        raft_timer.lock().unwrap().append(msg_id, to as u32, RaftTimestampType::AfterRPCSent, time_now());
-                    }
-                });
+
+            if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
+                let mut timer = raft_timer.lock().unwrap();
+                for msg_id in msg_ids {
+                    // タイムスタンプ RPC 送信後 104
+                    timer.append(msg_id, to as u32, RaftTimestampType::AfterRPCSent, time_now());
+                }
+            }
         }
     }
 }
@@ -423,6 +428,7 @@ fn on_ready(
     proposals: &Mutex<VecDeque<Proposal>>,
     logger: &slog::Logger,
     raft_timer: Arc<Mutex<RaftTimerStorage>>,
+    log_target: Arc<Mutex<Box<dyn Write + Send>>>
 ) {
     if !raft_group.has_ready() {
         return;
@@ -440,17 +446,26 @@ fn on_ready(
             msgs_group.entry(key).or_default().push(msg);
         }
         for (key, send_tx) in send_txs {
-            if let Some(msgs) = msgs_group.remove(key) {
-                for msg in msgs.iter() {
-                    let to = msg.to;
-                    msg.entries
-                        .iter()
-                        .for_each(|entry| {
-                            if let Some(msg_id) = le_bytes_to_u32(entry.get_context()) {
-                                // タイムスタンプ 送信部にメッセージ受け渡し前 103
-                                raft_timer.lock().unwrap().append(msg_id, to as u32, RaftTimestampType::BeforeMessageSend, time_now());
-                            }
-                        });
+            if let Some(mut msgs) = msgs_group.remove(key) {
+                for msg in msgs.iter_mut() {
+                    let to = msg.to as u32;
+
+                    // FIXME: 条件はcontextが空ではなくリーダなら，が適切？
+                    if msg.get_context().is_empty() {
+                        let entries_context: Vec<u8> = msg.entries.iter()
+                            .flat_map(|e| e.get_context())
+                            .cloned()
+                            .collect();
+                        msg.set_context(entries_context.into());
+                    }
+
+                    if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
+                        let mut timer = raft_timer.lock().unwrap();
+                        for msg_id in msg_ids {
+                            // タイムスタンプ 送信部にメッセージ受け渡し前 103
+                            timer.append(msg_id, to, RaftTimestampType::BeforeMessageSend, time_now());
+                        }
+                    }
                 }
                 send_tx.send(msgs).unwrap();
             }
@@ -475,7 +490,7 @@ fn on_ready(
     }
 
     let handle_committed_entries =
-        |rn: &mut RawNode<MemStorage>, committed_entries: Vec<Entry>| {
+        |rn: &mut RawNode<MemStorage>, committed_entries: Vec<Entry>, log_target: Arc<Mutex<Box<dyn Write + Send>>>| {
             for entry in committed_entries {
                 if entry.data.is_empty() {
                     // From new elected leaders.
@@ -575,10 +590,15 @@ fn on_ready(
                         None => proposal.propose_success.send((res, None)).unwrap()
                     }
                 }
+                else if let Some(msg_id) = le_bytes_to_u32(&entry.context) {
+                    if let Some(timer) = raft_timer.lock().unwrap().take(msg_id){
+                        timer.dump(log_target.lock().unwrap().deref_mut());
+                    }
+                }
             }
         };
     // Apply all committed entries.
-    handle_committed_entries(raft_group, ready.take_committed_entries());
+    handle_committed_entries(raft_group, ready.take_committed_entries(), Arc::clone(&log_target));
 
     // Persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
     // raft logs to the latest position.
@@ -609,7 +629,7 @@ fn on_ready(
     // Send out the messages.
     handle_messages(light_rd.take_messages(), send_txs, Arc::clone(&raft_timer));
     // Apply all committed entries.
-    handle_committed_entries(raft_group, light_rd.take_committed_entries());
+    handle_committed_entries(raft_group, light_rd.take_committed_entries(), Arc::clone(&log_target));
     // Advance the apply index.
     raft_group.advance_apply();
 }

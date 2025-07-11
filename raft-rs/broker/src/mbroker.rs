@@ -97,11 +97,12 @@ impl MBroker {
         let mq_pool = MQueuePool::new();
         let mq_pool = Arc::new(RwLock::new(mq_pool));
         let mq_pool_clone = Arc::clone(&mq_pool);
-        thread::spawn(move || {start_raft(proposals_clone, mq_pool_clone, self.my_address, self.raft_addresses);});
+        let log_target = Arc::new(Mutex::new(self.log_target));
+        let log_target_c = Arc::clone(&log_target);
+        thread::spawn(move || {start_raft(proposals_clone, mq_pool_clone, self.my_address, self.raft_addresses, log_target_c);});
         let msg_id = FIRST_MSG_ID;
         let msg_id = Arc::new(Mutex::new(msg_id));
         let timeout_len = self.timeout;
-        let log_target = Arc::new(Mutex::new(self.log_target));
 
         log_target.lock().unwrap().write_all(b"proc_count,total_msg_count,id,node_id,msg_type,tsc\n").unwrap();
 
