@@ -104,7 +104,7 @@ impl MBroker {
         let msg_id = Arc::new(Mutex::new(msg_id));
         let timeout_len = self.timeout;
 
-        log_target.lock().unwrap().write_all(b"proc_count,total_msg_count,id,node_id,msg_type,tsc\n").unwrap();
+        log_target.lock().unwrap().write_all(b"proc_count,total_msg_count,id,node_id_from,node_id_to,msg_type,tsc\n").unwrap();
 
         // info!("start");
         // {
@@ -189,12 +189,12 @@ fn treat_client(
                         let tsc = time_now();
                         let mut ack = into_normal_ack(msg.clone(), myid);
                         msg.header.id = get_msg_id(Arc::clone(&msg_id));
-                        timer.append(msg.header.id, 0, msg.header.msg_type(), tsc); //1
+                        timer.append(msg.header.id, 0, 0, msg.header.msg_type(), tsc); //1
 
                         let (proposal, rx) = Proposal::normal(msg.clone());
                         // タイムスタンプ Raftにメッセージ譲渡 101
                         // FIXME: append される node_id は決め打ちでなく Raft インスタンスの node id であるべき
-                        timer.append(msg.header.id, 1, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
+                        timer.append(msg.header.id, 1, 1, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                         proposals.lock().unwrap().push_back(proposal);
                         let (_, raft_timers) = rx.recv().unwrap();
                         if let Some(raft_timers) = raft_timers {
@@ -202,7 +202,7 @@ fn treat_client(
                         }
                         // Raft 処理終了後 109
                         // FIXME: append される node_id は決め打ちでなく Raft インスタンスの node id であるべき
-                        timer.append(msg.header.id, 1, RaftTimestampType::AfterRaftProcessComplete, time_now());
+                        timer.append(msg.header.id, 1, 1, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
                         stream.send_msg(&mut ack).unwrap();
                         _counter += 1;
@@ -242,7 +242,7 @@ fn treat_client(
                             // // Raft 処理終了後 109
                             // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
-                            timer.append(res.header.id, 0, res.header.msg_type(), time_now()); //7
+                            timer.append(res.header.id, 0, 0,  res.header.msg_type(), time_now()); //7
                             stream.send_msg(&mut res).unwrap();
                         }
                     }
@@ -305,7 +305,7 @@ fn treat_client(
                     // // Raft 処理終了後 109
                     // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
-                    timer.append(res.header.id, 0, res.header.msg_type(), time_now()); //7
+                    timer.append(res.header.id, 0, 0, res.header.msg_type(), time_now()); //7
                     stream.send_msg(&mut res).unwrap();
                 }
             }

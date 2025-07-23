@@ -203,12 +203,13 @@ fn run_node(
             match recv_rx.try_recv() {
                 Ok(msg) => {
                     let from = msg.from;
+                    let to = msg.to;
                     if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
                         debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
                         let mut timer = raft_timer.lock().unwrap();
                         for msg_id in msg_ids {
                             // タイムスタンプ 受信部からの受け取り 106
-                            timer.append(msg_id, from as u32, RaftTimestampType::BeforeReceivedLogAppend, time_now());
+                            timer.append(msg_id, from as u32, to as u32, RaftTimestampType::BeforeReceivedLogAppend, time_now());
                         }
                     }
                     node.step(msg, &logger)
@@ -275,11 +276,12 @@ fn treat_recv_stream(
                     debug!(logger, "{:?}", msg);
 
                     if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
-                        let node_id = msg.from;
+                        let from = msg.from;
+                        let to = msg.to;
                         let mut timer = raft_timer.lock().unwrap();
                         for msg_id in msg_ids {
                             // タイムスタンプ RPC 受信後 105
-                            timer.append(msg_id, node_id as u32, RaftTimestampType::AfterRPCReceived, time_now());
+                            timer.append(msg_id, from as u32, to as u32, RaftTimestampType::AfterRPCReceived, time_now());
                         }
                     }
 
@@ -310,6 +312,7 @@ fn treat_send_stream(
             }
         };
         for msg in msgs {
+            let from = msg.from;
             let to = msg.to;
             let bytes = msg.write_to_bytes().unwrap();
             let size = bytes.len();
@@ -325,7 +328,7 @@ fn treat_send_stream(
                 let mut timer = raft_timer.lock().unwrap();
                 for msg_id in msg_ids {
                     // タイムスタンプ RPC 送信後 104
-                    timer.append(msg_id, to as u32, RaftTimestampType::AfterRPCSent, time_now());
+                    timer.append(msg_id, from as u32, to as u32, RaftTimestampType::AfterRPCSent, time_now());
                 }
             }
         }
@@ -448,6 +451,7 @@ fn on_ready(
         for (key, send_tx) in send_txs {
             if let Some(mut msgs) = msgs_group.remove(key) {
                 for msg in msgs.iter_mut() {
+                    let from = msg.from as u32;
                     let to = msg.to as u32;
 
                     // FIXME: 条件はcontextが空ではなくリーダなら，が適切？
@@ -463,7 +467,7 @@ fn on_ready(
                         let mut timer = raft_timer.lock().unwrap();
                         for msg_id in msg_ids {
                             // タイムスタンプ 送信部にメッセージ受け渡し前 103
-                            timer.append(msg_id, to, RaftTimestampType::BeforeMessageSend, time_now());
+                            timer.append(msg_id, from, to, RaftTimestampType::BeforeMessageSend, time_now());
                         }
                     }
                 }
