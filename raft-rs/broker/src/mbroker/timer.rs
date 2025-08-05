@@ -96,4 +96,15 @@ impl RaftTimerStorage {
     pub fn take(&mut self, msg_id: c_uint) -> Option<TimerStorage> {
         self.timestamps.remove(&msg_id)
     }
+
+    pub fn take_all(&mut self) -> Option<TimerStorage> {
+        if self.timestamps.is_empty() {
+            None
+        } else {
+            let timestamps = std::mem::take(&mut self.timestamps);
+            Some(TimerStorage {
+                record: timestamps.into_iter().flat_map(|(_, storage)| storage.record).collect(),
+            })
+        }
+    }
 }

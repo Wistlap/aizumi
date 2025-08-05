@@ -314,6 +314,11 @@ fn treat_client(
     }
     timer.dump(log_target.lock().unwrap().deref_mut());
     // info!("counter: {}, tsc: {}", counter, timer.len());
+    // フォロワにログを出力させる
+    let msg = Message::new(MessageHeader::new(MessageType::StatReq, client_id as c_uint, 0 as c_uint, 0 as c_uint));
+    let (proposal, rx) = Proposal::normal(msg);
+    proposals.lock().unwrap().push_back(proposal);
+    rx.recv().unwrap();
 }
 
 fn into_normal_ack(msg: Message, myid: c_uint) -> Message {

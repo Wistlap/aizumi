@@ -202,16 +202,16 @@ fn run_node(
         loop {
             match recv_rx.try_recv() {
                 Ok(msg) => {
-                    let from = msg.from;
-                    let to = msg.to;
-                    if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
-                        debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
-                        let mut timer = raft_timer.lock().unwrap();
-                        for msg_id in msg_ids {
-                            // タイムスタンプ 受信部からの受け取り 106
-                            timer.append(msg_id, from as u32, to as u32, RaftTimestampType::BeforeReceivedLogAppend, time_now());
-                        }
-                    }
+                    // let from = msg.from;
+                    // let to = msg.to;
+                    // if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
+                    //     debug!(logger, "MsgAppendResponse: {:?}", msg_ids);
+                    //     let mut timer = raft_timer.lock().unwrap();
+                    //     for msg_id in msg_ids {
+                    //         // タイムスタンプ 受信部からの受け取り 106
+                    //         timer.append(msg_id, from as u32, to as u32, RaftTimestampType::BeforeReceivedLogAppend, time_now());
+                    //     }
+                    // }
                     node.step(msg, &logger)
                 },
                 Err(TryRecvError::Empty) => break,
@@ -441,7 +441,7 @@ fn on_ready(
     // Get the `Ready` with `RawNode::ready` interface.
     let mut ready = raft_group.ready();
 
-    fn handle_messages(msgs: Vec<Message>, send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>, raft_timer: Arc<Mutex<RaftTimerStorage>>) {
+    fn handle_messages(msgs: Vec<Message>, send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>, _raft_timer: Arc<Mutex<RaftTimerStorage>>) {
         let mut msgs_group: BTreeMap<u64, Vec<Message>> = BTreeMap::new();
         for msg in msgs {
             let key = msg.to;
@@ -451,8 +451,6 @@ fn on_ready(
         for (key, send_tx) in send_txs {
             if let Some(mut msgs) = msgs_group.remove(key) {
                 for msg in msgs.iter_mut() {
-                    let from = msg.from as u32;
-                    let to = msg.to as u32;
 
                     // FIXME: 条件はcontextが空ではなくリーダなら，が適切？
                     if msg.get_context().is_empty() {
@@ -463,13 +461,15 @@ fn on_ready(
                         msg.set_context(entries_context.into());
                     }
 
-                    if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
-                        let mut timer = raft_timer.lock().unwrap();
-                        for msg_id in msg_ids {
-                            // タイムスタンプ 送信部にメッセージ受け渡し前 103
-                            timer.append(msg_id, from, to, RaftTimestampType::BeforeMessageSend, time_now());
-                        }
-                    }
+                    // let from = msg.from as u32;
+                    // let to = msg.to as u32;
+                    // if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
+                    //     let mut timer = raft_timer.lock().unwrap();
+                    //     for msg_id in msg_ids {
+                    //         // タイムスタンプ 送信部にメッセージ受け渡し前 103
+                    //         timer.append(msg_id, from, to, RaftTimestampType::BeforeMessageSend, time_now());
+                    //     }
+                    // }
                 }
                 send_tx.send(msgs).unwrap();
             }
@@ -576,6 +576,17 @@ fn on_ready(
                             debug!(logger, "peer {}: process HeloReq: {:?}", rn.raft.id, msg.header.id);
                             None
                         }
+                        MbMessageType::StatReq => {
+                            if rn.raft.state == StateRole::Follower {
+                                if let Some(timer) = raft_timer.lock().unwrap().take_all() {
+                                    let log_target = Arc::clone(&log_target);
+                                    thread::spawn(move || {
+                                        timer.dump(log_target.lock().unwrap().deref_mut());
+                                    });
+                                }
+                            }
+                            None
+                        }
                         _ => {
                             // The other MessageType will never be received
                             None
@@ -592,11 +603,6 @@ fn on_ready(
                     match le_bytes_to_u32(&entry.context) {
                         Some(msg_id) => proposal.propose_success.send((res, raft_timer.lock().unwrap().take(msg_id))).unwrap(),
                         None => proposal.propose_success.send((res, None)).unwrap()
-                    }
-                }
-                else if let Some(msg_id) = le_bytes_to_u32(&entry.context) {
-                    if let Some(timer) = raft_timer.lock().unwrap().take(msg_id){
-                        timer.dump(log_target.lock().unwrap().deref_mut());
                     }
                 }
             }
