@@ -5,6 +5,9 @@ import glob
 import re
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+from matplotlib import pyplot as plt
+import seaborn
+import datetime
 
 # msg_type に対して 'min' / 'max' / 'mediam' を指定
 msg_type_config = {
@@ -19,7 +22,7 @@ msg_type_config = {
 }
 
 # 差分計算用ペア
-pairs = [(101, 103), (103, 104), (104, 106), (106, 109), (101, 109)]
+pairs = [(101, 103), (103, 106), (106, 109), (101, 109)]
 
 # ファイル名から情報を抽出する正規表現
 reg = re.compile(
@@ -83,6 +86,7 @@ def main():
     with ProcessPoolExecutor() as executor:
         results = list(executor.map(process_file, paths))
 
+    hoge = []
     for node, final_df in results:
         print(f"\t{node}", end="")
         for s, e in pairs:
@@ -91,10 +95,31 @@ def main():
             if col_s in final_df.columns and col_e in final_df.columns:
                 diff = final_df[col_e] - final_df[col_s]
                 mean_val = diff.mean() if not diff.empty else None
+                if col_s == "tsc_101" and col_e == "tsc_109":
+                    hoge.append((node, mean_val))
             else:
                 mean_val = None
             print(f"\t{mean_val:.3f}" if mean_val is not None else "\tN/A", end="")
         print()
+    # x軸をnode, y軸をmean_valにして折れ線グラフを描画
+    df_plot = pd.DataFrame(hoge, columns=["node", "mean"])
+    df_plot["node"] = df_plot["node"].astype(int)
+    df_plot = df_plot.sort_values("node")
+
+    # 折れ線グラフの描画
+    # plt.figure(figsize=(8, 5))
+    seaborn.set_theme(style="whitegrid")
+    splot = seaborn.lineplot(data=df_plot, x="node", y="mean", marker="o")
+    plt.xticks(df_plot["node"].unique())
+    plt.xlabel("Node")
+    plt.ylabel("Raft processing time (ms)")
+    plt.tight_layout()
+    splot.get_figure()
+    date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    file_name = f'{date}.pdf'
+    plt.savefig(file_name)
+    plt.close()
+
 
 if __name__ == "__main__":
     main()
