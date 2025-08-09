@@ -9,9 +9,6 @@
 # and the number of receivers -r.
 ##########
 
-function is_receiver_working() {
-    test $(ps | grep m-receiver | wc -l) != 0
-}
 
 TOPDIR=$(dirname "$0")
 
@@ -26,7 +23,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
     -r)
         OPT_N_RECEIVERS=$2;
-        shift 2 ;;
+        shift 2   ;;
     -s)
         OPT_N_SENDERS=$2;
         shift 2   ;;
@@ -51,13 +48,9 @@ if [ -z "$OPT_N_RECEIVERS" ] || [ -z "$OPT_N_SENDERS" ] || [ -z "$OPT_N_NODES" ]
     exit 1
 fi
 
-RECEIVER="$TOPDIR/../client/m-receiver"
-SENDER="$TOPDIR/../client/m-sender"
 BROKER="$TOPDIR/../broker/target/release/raft-rs-broker"
 BROKER_PID_FILE="$TOPDIR/../broker.pid"
 
-FIRST_RECEIVER_ID=10000
-FIRST_SENDER_ID=1
 DEBUG_LEVEL=3
 NUM_RECEIVERS="$OPT_N_RECEIVERS"
 NUM_SENDERS="$OPT_N_SENDERS"
@@ -68,7 +61,11 @@ date=$(date +"%Y%m%d-%H%M%S")
 LOGDIR="$TOPDIR/../log"
 LOGFILE="$LOGDIR/test/raft-rs-broker-$NUM_SENDERS-$NUM_RECEIVERS-1-$MESSAGE_COUNT-$NUM_NODES-$date.log"
 
-# killall raft-rs-broker
+mkdir -p "$LOGDIR"
+mkdir -p "$LOGDIR/test"
+
+killall raft-rs-broker
+sleep 1
 
 BROKERS_IP=(
     "xx.xx.xx.xx:10000"
@@ -76,36 +73,9 @@ BROKERS_IP=(
     "xx.xx.xx.xx:10002"
 )
 
+touch $LOGFILE
+
 num_nodes=${NUM_NODES}
-for i in $(seq 2 $num_nodes)
-do
-    ip="${BROKERS_IP[$i-1]}"
-    echo "$BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $LOGFILE-$i --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}""
-    $BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE  -l "$LOGFILE-$i" --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}"&
-done
-sleep 4
-
-BROKER_LEADER_IP="${BROKERS_IP[0]}"
-num_messages=$(expr $MESSAGE_COUNT / $NUM_RECEIVERS)
-for i in $(seq 1 $NUM_RECEIVERS)
-do
-    myid=$(expr $FIRST_RECEIVER_ID + $i - 1)
-    $RECEIVER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL &
-done
-last_receiver_id=$myid
-sleep 2
-
-num_messages=$(expr $MESSAGE_COUNT / $NUM_RECEIVERS / $NUM_SENDERS)
-for i in $(seq 1 $NUM_SENDERS)
-do
-    myid=$(expr $FIRST_SENDER_ID + $i - 1)
-    $SENDER -b $BROKER_LEADER_IP -u $myid -c $num_messages -d $DEBUG_LEVEL $FIRST_RECEIVER_ID-$last_receiver_id &
-done
-
-while is_receiver_working
-do
-    sleep 1
-done
-sleep 10
-
-killall raft-rs-broker
+ip="${BROKERS_IP[0]}"  # Get the IP address of the first broker
+echo "$BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $LOGFILE --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}""
+$BROKER -b $ip -d $DEBUG_LEVEL -p $BROKER_PID_FILE -l $LOGFILE --raft-addrs "${BROKERS_IP[@]:0:$num_nodes}"&
