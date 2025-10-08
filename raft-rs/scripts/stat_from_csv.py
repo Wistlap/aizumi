@@ -10,7 +10,7 @@ import re
 ele_name1 = 'id'
 ele_name2 = 'msg_type'
 ele_name3 = 't6-t5'
-clock = 3400000000
+clock = 2800000000
 csv_file = sys.argv[1]
 df_orig = pd.read_csv(csv_file, skipinitialspace=True)
 df = df_orig.sort_values([ele_name1, ele_name2])

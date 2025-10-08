@@ -32,27 +32,31 @@ def bar_plot(df, df_c, file):
   # s-r と node を1つの複合キーに
   df['sr-node'] = df[df_c[1]] + '-' + df[df_c[0]]
   df = df[df[df_c[2]] != 'T']
-  print(df.head(10))
+  # print(df.head(10))
 
   # ピボットで T ごとの値を列に
-  pivot = df.pivot_table(index='sr-node', columns=df_c[2], values=df_c[3], fill_value=0)
-  print(pivot)
+  pivot = df.pivot_table(index='node', columns=df_c[2], values=df_c[3], fill_value=0)
+  # print(pivot)
   fig, ax = plt.subplots(figsize=(6,4))
   bottom = np.zeros(len(pivot))
   colors = plt.cm.tab10.colors
+  hatches = ['//', '\\\\', '||', 'xx']  # ハッチパターンのリスト
 
   for i, col in enumerate(pivot.columns):
-    ax.bar(pivot.index, pivot[col], bottom=bottom, label=col, color=colors[i], alpha=0.7)
+    ax.bar(pivot.index, pivot[col], bottom=bottom, label=col, hatch=hatches[i], color=colors[i], alpha=0.7)
     bottom += pivot[col]
 
     # sr-node を node と s-r に分けて x軸の見た目を調整
     ax.set_xticks(range(len(pivot)))
-    ax.set_xticklabels(pivot.index, rotation=45, ha='right')
+    # ax.set_xticklabels(pivot.index, rotation=45, ha='right')
 
-    ax.set_xlabel('sender-receiver-node')
+    ax.set_xlabel('node')
     ax.set_ylabel(df_c[3])
-    ax.legend(title=df_c[2])
+    ax.legend(title=df_c[2], loc='upper center', bbox_to_anchor=(0.5, 1.2), ncol=len(pivot.columns))  # 凡例をグラフの上に配置
+    # 凡例を横並びにする
   plt.savefig(file, bbox_inches='tight')
+  pivot['calcT'] = pivot['T_ready'] + pivot['T_fpcu'] + pivot['T_com'] + pivot['T_proc']
+  print(pivot)
 
 # 折れ線グラフ描画
 def line_plot(df, df_c, file):
@@ -118,15 +122,15 @@ def main(dir, bar, line):
   elif line:
     line_plot(df, dataframe_column, file_name)
 
-  # 使用したログディレクトリをメタデータとしてファイルに埋め込む
-  src_pdf = pypdf.PdfReader(file_name)
-  dst_pdf = pypdf.PdfWriter()
-  dst_pdf.clone_reader_document_root(src_pdf)
-  dst_pdf.add_metadata(src_pdf.metadata)
-  dst_pdf.add_metadata({'/Dirs': str(dirs)})
-  dst_pdf.write(file_name)
-  pdf = pypdf.PdfReader(file_name)
-  print('used dirs :', pdf.metadata['/Dirs'])
+  # # 使用したログディレクトリをメタデータとしてファイルに埋め込む
+  # src_pdf = pypdf.PdfReader(file_name)
+  # dst_pdf = pypdf.PdfWriter()
+  # dst_pdf.clone_reader_document_root(src_pdf)
+  # dst_pdf.add_metadata(src_pdf.metadata)
+  # dst_pdf.add_metadata({'/Dirs': str(dirs)})
+  # dst_pdf.write(file_name)
+  # pdf = pypdf.PdfReader(file_name)
+  # print('used dirs :', pdf.metadata['/Dirs'])
 
 
 # コマンドライン引数の parse と main 関数の呼び出し

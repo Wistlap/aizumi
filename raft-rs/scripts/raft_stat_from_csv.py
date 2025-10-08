@@ -53,13 +53,17 @@ border = totalnode//2
 # leader -> flatten: pivot per id
 pivot = L.pivot_table(index='id', columns='msg_type', values='tsc', aggfunc='min').reset_index()
 pivot = pivot.rename(columns={101:'ts101',104:'ts104',105:'ts105',109:'ts109'})
+pivot = pivot.drop(columns=['ts105'])
+# print(pivot)
 
 # id × border 個に展開 → leader105順の node_id_from を縦持ち
 l105 = L[L['msg_type']==105].sort_values(['id','tsc'])[['id','node_id_from','tsc']]
 l105['rank'] = l105.groupby('id').cumcount()+1
-l105 = l105[l105['rank']<=border][['id','node_id_from']]
+print(l105)
+l105 = l105[l105['rank']==border][['id','node_id_from', 'tsc']]
+
 # join pivot×l105 to restrict pairs → (id,fnode) to use
-l105 = l105.rename(columns={'node_id_from': 'fnode'})
+l105 = l105.rename(columns={'node_id_from': 'fnode', 'tsc': 'ts105'})
 pivot_expanded = pivot.merge(l105, on='id', how='inner')
 # pivot_expanded has id,ts101,ts104,ts105,ts109,fnode
 # print(pivot_expanded)
@@ -76,13 +80,16 @@ for fp in args.followers:
 F = pd.concat(fl)
 # min per id,fnode
 # f104: 特定フォロワだけから id,fnode 単位の最小値
-target_fnodes = pivot_expanded['fnode'].unique()
+keys = pivot_expanded[['id','fnode']].drop_duplicates()
+# msg_type=104 に絞り、必要な列だけ残す
 f104 = (
-    F[(F['msg_type']==104) & (F['fnode'].isin(target_fnodes))]
-    .groupby(['id','fnode'])['tsc'].min()
-    .reset_index(name='f104')
+    F.loc[F['msg_type'] == 104, ['id', 'fnode', 'tsc']]
+    .merge(keys, on=['id','fnode'], how='inner')
+    .groupby(['id','fnode'], as_index=False)['tsc']
+    .min()
+    .rename(columns={'tsc': 'f104'})
 )
-
+# print(f104)
 # merge leader pivot_expanded × f104
 merged = pivot_expanded.merge(f104, on=['id','fnode'], how='inner')
 
@@ -94,18 +101,18 @@ merged = merged.merge(f105, on='id', how='left')
 
 # for each id： aggregate follower stats vectorized → groupby
 def calc(group):
-    ts101 = group['ts101'].iloc[0]
-    ts104 = group['ts104'].iloc[0]
+    ts101L = group['ts101'].iloc[0]
+    ts104L = group['ts104'].iloc[0]
     ts105L= group['ts105'].iloc[0]
-    ts109 = group['ts109'].iloc[0]
-    min105 = group['f105'].min()
-    max104 = group['f104'].max()
+    ts109L = group['ts109'].iloc[0]
+    ts105F = group['f105'].iloc[0]
+    ts104F = group['f104'].iloc[0]
     return pd.Series({
-        'T_ready': ts104-ts101,
-        'T_fcpu': max104-min105,
-        'T_com': (ts105L-ts104)-(max104-min105),
-        'T_proc': ts109-ts105L,
-        'T': ts109-ts101
+        'T_ready': ts104L-ts101L,
+        'T_fcpu': ts104F-ts105F,
+        'T_com': (ts105L-ts104L)-(ts104F-ts105F),
+        'T_proc': ts109L-ts105L,
+        'T': ts109L-ts101L
     })
 
 out = merged.groupby('id').apply(calc).reset_index()

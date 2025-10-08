@@ -40,6 +40,7 @@ def bar_plot(df, df_c, file):
   splot = seaborn.barplot(x=df_c[0],y=df_c[2],data=df, palette=colors, errorbar=None, dodge=True)
   plt.grid(axis='y', linestyle='dashed', linewidth=0.7, alpha=0.5)
   plt.ylim(0, max(df[df_c[2]])*1.1)
+  plt.xticks(rotation=45, ha='center')
   # 凡例の表示形式を変更する場合
   # plt.legend(loc="center", title=df_c[1], ncol=5, bbox_to_anchor=(.5, 1.1))
   splot.get_figure()
@@ -79,8 +80,10 @@ def main(dirs, n, t, scatter, bar):
       table.append([(sender_num, receiver_num), broker_opt2_num, throughput])
   table.sort()
   # table = [[f'{sender}-{receiver}', f'{broker_opt}:{broker}', throughput] for (sender, receiver), broker_opt, broker, throughput in table]
-  table = [[f's:{sender}\nr:{receiver}', f'{broker_opt}', throughput] for (sender, receiver), broker_opt, throughput in table]
-  print(table)
+  table = [[f'{sender}-{receiver}', f'{broker_opt}', throughput] for (sender, receiver), broker_opt, throughput in table]
+  # print(table)
+  for i in range(len(table)):
+    print(f'{table[i][2]}', end='\t\t')
 
   # データフレームの作成
   df = pd.DataFrame(data=table, columns=dataframe_column)
@@ -95,12 +98,12 @@ def main(dirs, n, t, scatter, bar):
     bar_plot(df, dataframe_column, file_name)
 
   # 使用したログディレクトリをメタデータとしてファイルに埋め込む
-  src_pdf = pypdf.PdfReader(file_name)
-  dst_pdf = pypdf.PdfWriter()
-  dst_pdf.clone_reader_document_root(src_pdf)
-  dst_pdf.add_metadata(src_pdf.metadata)
-  dst_pdf.add_metadata({'/Dirs': str(dirs)})
-  dst_pdf.write(file_name)
+  # src_pdf = pypdf.PdfReader(file_name)
+  # dst_pdf = pypdf.PdfWriter()
+  # dst_pdf.clone_reader_document_root(src_pdf)
+  # dst_pdf.add_metadata(src_pdf.metadata)
+  # dst_pdf.add_metadata({'/Dirs': str(dirs)})
+  # dst_pdf.write(file_name)
   # pdf = pypdf.PdfReader(file_name)
   # print('used dirs :', pdf.metadata['/Dirs'])
 
