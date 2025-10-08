@@ -39,13 +39,6 @@ pub struct NetStream {
 }
 
 impl NetStream {
-    /// Sets the read timeout to the timeout specified.
-    ///
-    /// Return [`io::ErrorKind::WouldBlock`] when a read times out
-    // pub fn set_timeout(&mut self, duration: time::Duration) -> Result<(), io::Error> {
-    //     self.stream.set_read_timeout(Some(duration))
-    // }
-
     /// Receive [`Message`] from client
     pub fn recv_msg(&mut self) -> Result<Message, std::io::Error> {
         let mut buf: [u8; MSG_TOTAL_LEN] = [0; MSG_TOTAL_LEN];
