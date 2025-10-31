@@ -40,6 +40,8 @@ struct message {
 #define MSG_STAT_REQ 11   // client -> broker (+stat_type)
 #define MSG_STAT_RES 12   // broker -> client (+stat)
 
+#define MSG_NACK 13 // generic negative ack
+
 const char* msg_type_to_string(int msg_type);
 void msg_dump(struct message *msg);
 void msg_fdump(FILE *fp, struct message *msg);

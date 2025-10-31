@@ -127,7 +127,8 @@ int send_message_app(int fd, int myid, int receiver_id, void *payload, size_t si
 int client_register2(int fd, int myid, int broker_id) {
   struct message msg;
   net_send_msg(fd, msg_fill_hdr(&msg, MSG_HELO_REQ, myid, broker_id, 0));
-  return net_recv_ack(fd, NULL, MSG_HELO_ACK, msg.hdr.id);
+  struct network_result net_res = net_recv_ack(fd, NULL, MSG_HELO_ACK, msg.hdr.id);
+  return net_res.data;
 }
 
 #if 1
@@ -166,7 +167,8 @@ int client_event_loop2(const int fd, const int myid, const struct event_handlers
       continue;
     }
 
-    if ((n = net_recv_msg(fd, &msg)) != MSG_TOTAL_LEN) {
+    struct network_result net_res = net_recv_msg(fd, &msg);
+    if ((n = net_res.data) != MSG_TOTAL_LEN) {
       // connection closed
       logger_error("net_recv_msg failed: %d\n", n);
       break;

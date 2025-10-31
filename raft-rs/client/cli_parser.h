@@ -21,6 +21,8 @@ struct cli_option {
   uint32_t trans_count;     // number of transfer commands
   int receivers[1000];      // 1, 2, 3, 4...
   int logsignal;            // 0 or 1
+  char **broker_replicas;          // broker candidates "127.0.0.1:3000,127.0.0.1:3000,..."
+  int broker_replicas_count;        // for count broker candidates. It is not command line argument
 };
 
 #define OPT_DEFAULT_MYID_SENDER 10000
@@ -42,3 +44,4 @@ extern struct cli_option CLI_OPTION_DEFAULT;
 void cli_dump(struct cli_option *opt);
 void cli_fdump(FILE *fp, struct cli_option *opt);
 int cli_parse_option(int argc, char * const argv[], struct cli_option *parsed_opt);
+void init_cli_option(struct cli_option *opt);

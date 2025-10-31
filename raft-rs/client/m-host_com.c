@@ -313,7 +313,8 @@ int main(int argc, char *argv[])
   logger_setup_pid_file(opt.pid_file, PROG_NAME);
   logger_tinfo("* ", " %s started.\n", PROG_NAME);
 
-  int fd = net_connect(opt.broker_host, opt.broker_port);
+  struct network_result net_res = net_connect(opt.broker_host, opt.broker_port);
+  int fd = net_res.data;
 
   if (fd < 0) {
     logger_error("failed to connect %s:%s\n",

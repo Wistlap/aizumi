@@ -21,26 +21,50 @@ struct th_arg {
 };
 
 struct event_handlers {
-  int (*send_req)(int fd, void *msg);
-  int (*send_ack)(int fd, void *msg);
-  int (*recv_req)(int fd, void *msg);
-  int (*recv_ack)(int fd, void *msg);
-  int (*free_req)(int fd, void *msg);
-  int (*free_ack)(int fd, void *msg);
-  int (*push_req)(int fd, void *msg);
-  int (*push_ack)(int fd, void *msg);
-  int (*helo_req)(int fd, void *msg);
-  int (*helo_ack)(int fd, void *msg);
+  int (*send_req)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*send_ack)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*recv_req)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*recv_ack)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*free_req)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*free_ack)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*push_req)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*push_ack)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*helo_req)(int *epfd, int *fd, void *msg, struct cli_option opt);
+  int (*helo_ack)(int *epfd, int *fd, void *msg, struct cli_option opt);
   int (*timeout)(void *);
 };
 
-int client_register(int fd, int myid, int broker_id) {
+struct network_result client_register(int fd, int myid, int broker_id) {
   struct message msg;
-  net_send_msg(fd, msg_fill_hdr(&msg, MSG_HELO_REQ, myid, broker_id, 0));
-  return net_recv_ack(fd, NULL, MSG_HELO_ACK, msg.hdr.id);
+  struct network_result net_res = net_send_msg(fd, msg_fill_hdr(&msg, MSG_HELO_REQ, myid, broker_id, 0));
+  if (net_res.status != NETWORK_STATUS_SUCCESS) {
+    return net_res;
+  }
+  net_res = net_recv_ack(fd, NULL, MSG_HELO_ACK, msg.hdr.id);
+  return net_res;
 }
 
-int client_event_loop(int fd, int myid, struct event_handlers *hd, void *context)
+int update_epoll_fd(int *epfd, int old_fd, int new_fd)
+{
+  struct epoll_event ev;
+  memset(&ev, 0, sizeof ev);
+
+  ev.events = EPOLLIN;
+  ev.data.fd = new_fd;
+
+  if (epoll_ctl(*epfd, EPOLL_CTL_DEL, old_fd, NULL) != 0) {
+    logger_error("epoll_ctl DEL failed\n");
+    return -1;
+  }
+
+  if (epoll_ctl(*epfd, EPOLL_CTL_ADD, new_fd, &ev) != 0) {
+    logger_error("epoll_ctl ADD failed\n");
+    return -1;
+  }
+  return 0;
+}
+
+int client_event_loop(int *fd, struct cli_option opt, struct event_handlers *hd, void *context)
 {
   int n, nfd, count = 0;
   struct message msg;
@@ -57,9 +81,9 @@ int client_event_loop(int fd, int myid, struct event_handlers *hd, void *context
   memset(&ev, 0, sizeof ev);
 
   ev.events = EPOLLIN;
-  ev.data.fd = fd;
+  ev.data.fd = *fd;
 
-  if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) != 0) {
+  if (epoll_ctl(epfd, EPOLL_CTL_ADD, *fd, &ev) != 0) {
     logger_error("epoll_ctl");
   }
 
@@ -73,13 +97,28 @@ int client_event_loop(int fd, int myid, struct event_handlers *hd, void *context
       continue;
     }
 
-    if ((n = net_recv_msg(fd, &msg)) != MSG_TOTAL_LEN) {
+    struct network_result net_res = net_recv_msg(*fd, &msg);
+    while (net_res.status != NETWORK_STATUS_SUCCESS) {
+      int new_fd = net_reconnect(net_res, opt);
+      if (new_fd < 0) {
+        logger_error("failed to reconnect\n");
+        break;
+      }
+      update_epoll_fd(&epfd, *fd, new_fd);
+      close(*fd);
+      *fd = new_fd;
+
+      net_res = net_recv_msg(*fd, &msg);
+    }
+
+    n = net_res.data;
+    if (n != MSG_TOTAL_LEN) {
       // connection closed
       // printf("net_recv_msg failed: %d\n", n);
       break;
     }
 
-    int (*handler_func)(int fd, void *msg) = NULL;
+    int (*handler_func)(int *epfd, int *fd, void *msg, struct cli_option opt) = NULL;
     switch (msg.hdr.msg_type) {
     case MSG_SEND_REQ: handler_func = hd->send_req; break;
     case MSG_SEND_ACK: handler_func = hd->send_ack; break;
@@ -100,7 +139,7 @@ int client_event_loop(int fd, int myid, struct event_handlers *hd, void *context
     }
 
     if (handler_func) {
-      if (handler_func(fd, &msg) != 0) {
+      if (handler_func(&epfd, fd, &msg, opt) != 0) {
         break;
       }
     } else {
@@ -112,12 +151,12 @@ int client_event_loop(int fd, int myid, struct event_handlers *hd, void *context
   }
 
   // connection closed
-  close(fd);
+  close(*fd);
   logger_info("connection closed from peer\n");
   return 0;
 }
 
-int message_arrived(int fd, void *arg)
+int message_arrived(int *epfd, int *fd, void *arg, struct cli_option opt)
 {
   struct message *msg = (struct message *)arg;
   static int count = 0;
@@ -125,17 +164,79 @@ int message_arrived(int fd, void *arg)
   // Something to do with msg here...
 
   int myid = msg->hdr.daddr;
-  net_send_ack(fd, msg, myid);
+  struct network_result net_res = net_send_ack(*fd, msg, myid);
+  while (net_res.status != NETWORK_STATUS_SUCCESS)
+  {
+    int new_fd = net_reconnect(net_res, opt);
+    if (new_fd < 0) {
+      logger_error("failed to reconnect\n");
+      return -1;
+    }
+    update_epoll_fd(epfd, *fd, new_fd);
+    close(*fd);
+    *fd = new_fd;
+    net_res = net_send_ack(*fd, msg, myid);
+  }
 
-  net_send_msg(fd, msg_fill_hdr(msg, MSG_FREE_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
-  net_recv_ack(fd, NULL, MSG_FREE_ACK, msg->hdr.id);
+  net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_FREE_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
+  while (net_res.status != NETWORK_STATUS_SUCCESS)
+  {
+    int new_fd = net_reconnect(net_res, opt);
+    if (new_fd < 0) {
+      logger_error("failed to reconnect\n");
+      return -1;
+    }
+    update_epoll_fd(epfd, *fd, new_fd);
+    close(*fd);
+    *fd = new_fd;
+    net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_FREE_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
+  }
+
+  net_res = net_recv_ack(*fd, NULL, MSG_FREE_ACK, msg->hdr.id);
+  while (net_res.status != NETWORK_STATUS_SUCCESS)
+  {
+    int new_fd = net_reconnect(net_res, opt);
+    if (new_fd < 0) {
+      logger_error("failed to reconnect\n");
+      return -1;
+    }
+    update_epoll_fd(epfd, *fd, new_fd);
+    close(*fd);
+    *fd = new_fd;
+    net_res = net_recv_ack(*fd, NULL, MSG_FREE_ACK, msg->hdr.id);
+  }
 
   if (count % 10000 == 0) logger_info("%d received, message: %s, id: %d\n", count, msg->payload, msg->hdr.id);
   count++;
 
   if (count >= max_count) {
-    net_send_msg(fd, msg_fill_hdr(msg, MSG_STAT_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
-    net_recv_ack(fd, NULL, MSG_STAT_RES, msg->hdr.id);
+    net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_STAT_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
+    while (net_res.status != NETWORK_STATUS_SUCCESS)
+    {
+      int new_fd = net_reconnect(net_res, opt);
+      if (new_fd < 0) {
+        logger_error("failed to reconnect\n");
+        return -1;
+      }
+      update_epoll_fd(epfd, *fd, new_fd);
+      close(*fd);
+      *fd = new_fd;
+      net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_STAT_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
+    }
+
+    net_res = net_recv_ack(*fd, NULL, MSG_STAT_RES, msg->hdr.id);
+    while (net_res.status != NETWORK_STATUS_SUCCESS)
+    {
+      int new_fd = net_reconnect(net_res, opt);
+      if (new_fd < 0) {
+        logger_error("failed to reconnect\n");
+        return -1;
+      }
+      update_epoll_fd(epfd, *fd, new_fd);
+      close(*fd);
+      *fd = new_fd;
+      net_res = net_recv_ack(*fd, NULL, MSG_STAT_RES, msg->hdr.id);
+    }
     return -1; // exit event loop
   } else {
     return 0;
@@ -152,7 +253,8 @@ void usage_and_exit(int status)
 
 int main(int argc, char *argv[])
 {
-  struct cli_option opt = CLI_OPTION_DEFAULT; // clone default
+  struct cli_option opt;
+  init_cli_option(&opt); // clone default
   opt.myid = 0; // default my address
 
   if (cli_parse_option(argc, argv, &opt) < 0 || opt.receivers[0] != -1)
@@ -164,18 +266,24 @@ int main(int argc, char *argv[])
   logger_tinfo("* ", " %s started.\n", PROG_NAME);
   max_count = opt.msg_amount;
 
-  int fd = net_connect(opt.broker_host, opt.broker_port);
-
+  int fd = net_connect_recursive(opt.broker_host, opt.broker_port, (const char **)opt.broker_replicas,opt.broker_replicas_count);
   if (fd < 0) {
-    logger_error("failed to connect %s:%s\n",
-                 opt.broker_host, opt.broker_port);
     exit(-1);
   }
 
   cli_fdump(logger_fp(LOG_DEBUG), &opt);
 
-  if (client_register(fd, opt.myid, MSG_ADDR_BROKER) < 0) {
-    logger_error("could not registered.\n");
+  struct network_result net_res = client_register(fd, opt.myid, MSG_ADDR_BROKER);
+  while (net_res.status != NETWORK_STATUS_SUCCESS) {
+    close(fd);
+    sleep(1);
+
+    fd = net_reconnect(net_res, opt);
+    net_res = client_register(fd, opt.myid, MSG_ADDR_BROKER);
+  }
+
+  int n = net_res.data;
+  if (n < 0) {
     close(fd);
     exit(-1);
   }
@@ -194,7 +302,7 @@ int main(int argc, char *argv[])
     .timeout  = NULL,
   };
 
-  int result = client_event_loop(fd, opt.myid, &handler, NULL);
+  int result = client_event_loop(&fd, opt, &handler, NULL);
   close(fd);
   return result;
 }

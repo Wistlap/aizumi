@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use std::thread;
 use std::ops::DerefMut;
 
-
 use protobuf::Message as PbMessage;
 use raft::storage::MemStorage;
 use raft::{prelude::*, StateRole};
@@ -29,6 +28,7 @@ use super::message::MessageType as MbMessageType;
 use super::queue::{MQueue, MQueuePool};
 
 const LEADER_NODE: u64 = 6555;
+const RAFT_PORT_OFFSET: u64 = 1000;
 
 pub fn start_raft(
     proposals: Arc<Mutex<VecDeque<Proposal>>>,
@@ -52,9 +52,9 @@ pub fn start_raft(
     let (accept_tx, accept_rx) = mpsc::channel();
     let (connect_tx, connect_rx) = mpsc::channel();
 
-    // Add 1000 to the port number for Raft
+    // Add RAFT_PORT_OFFSET to the port number for Raft
     let mut parts = my_address.rsplitn(2, ':');
-    let my_port = parts.next().unwrap().parse::<u64>().unwrap() + 1000;
+    let my_port = parts.next().unwrap().parse::<u64>().unwrap() + RAFT_PORT_OFFSET;
     let my_addr = parts.next().unwrap().to_string();
     let my_new_ip = (my_addr, my_port);
 
@@ -62,7 +62,7 @@ pub fn start_raft(
     .iter()
     .map(|ip| {
         let mut parts = ip.rsplitn(2, ':');
-        let port = parts.next().unwrap().parse::<u64>().unwrap() + 1000;
+        let port = parts.next().unwrap().parse::<u64>().unwrap() + RAFT_PORT_OFFSET;
         let addr = parts.next().unwrap().to_string();
         (addr, port)
     })
@@ -175,6 +175,7 @@ fn run_node(
     // Channels for receiving messages from other nodes.
     let (recv_tx, recv_rx) = mpsc::channel();
     let mut send_txs: BTreeMap<u64, Sender<Vec<Message>>> = BTreeMap::new();
+    let mut node_addrs: BTreeMap<u64, String> = BTreeMap::new();
     if ! node.streams.is_empty() {
         let keys: Vec<u64> = node.streams.keys().cloned().collect();
         for key in keys {
@@ -183,6 +184,7 @@ fn run_node(
             send_txs.insert(key, send_tx);
             let recv_tx = recv_tx.clone();
             let (mut send_stream, mut recv_stream) = node.streams.remove(&key).unwrap();
+            node_addrs.insert(key, format!("{}:{}", recv_stream.peer_addr().unwrap().ip(), key - 1 + LEADER_NODE - RAFT_PORT_OFFSET));
             let logger_r = logger.clone();
             let raft_timer_r = Arc::clone(&raft_timer);
             thread::spawn(move || {
@@ -231,17 +233,30 @@ fn run_node(
             t = Instant::now();
         }
 
-        // Let the leader pick pending proposals from the global queue.
-        if raft_group.raft.state == StateRole::Leader {
-            // Handle new proposals.
-            let mut proposals = proposals.lock().unwrap();
-            for p in proposals.iter_mut().skip_while(|p| p.proposed > 0) {
-                // TODO: タイムスタンプ ログの追加
-                // // key に対応するキューに挿入
-                // raft_timer.lock().unwrap().entry(msg.index).or_default().push((1, time_now()));
+        // Handle new proposals.
+        let mut proposals_lock = proposals.lock().unwrap();
+        let mut deny_indexes: Vec<usize> = Vec::new();
+        for (idx, p) in proposals_lock.iter_mut().enumerate().skip_while(|(_, p)| p.proposed > 0) {
+            // TODO: タイムスタンプ ログの追加
+            // // key に対応するキューに挿入
+            // raft_timer.lock().unwrap().entry(msg.index).or_default().push((1, time_now()));
+
+            // Let the leader pick pending proposals from the global queue.
+            if raft_group.raft.state == StateRole::Leader {
                 propose(raft_group, p);
             }
+            else if let Some(leader_addr) = node_addrs.get(&raft_group.raft.leader_id).cloned() {
+                let res = ProposalData::LeaderInfo(leader_addr);
+                p.propose_success.send(res).unwrap();
+                deny_indexes.push(idx);
+            }
         }
+        if raft_group.raft.state != StateRole::Leader {
+            for &idx in deny_indexes.iter().rev() {
+                proposals_lock.remove(idx);
+            }
+        }
+        drop(proposals_lock);
 
         let raft_timer_c = Arc::clone(&raft_timer);
         // Handle readies from the raft.
@@ -601,8 +616,8 @@ fn on_ready(
                     // succeeded or not.
                     let proposal = proposals.lock().unwrap().pop_front().unwrap();
                     match le_bytes_to_u32(&entry.context) {
-                        Some(msg_id) => proposal.propose_success.send((res, raft_timer.lock().unwrap().take(msg_id))).unwrap(),
-                        None => proposal.propose_success.send((res, None)).unwrap()
+                        Some(msg_id) => proposal.propose_success.send(ProposalData::QueueOpResult((res, raft_timer.lock().unwrap().take(msg_id)))).unwrap(),
+                        None => proposal.propose_success.send(ProposalData::QueueOpResult((res, None))).unwrap(),
                     }
                 }
             }
@@ -672,7 +687,14 @@ pub struct Proposal {
     propose_success: SyncSender<ProposalData>,
 }
 
-type ProposalData = (Option<MbMessage>, Option<TimerStorage>);
+// キュー操作の結果のデータ構造
+pub enum ProposalData {
+    QueueOpResult(QueueOpData), // キュー操作の結果
+    LeaderInfo(String), // 新しいリーダの情報
+}
+
+// キュー操作のデータ構造
+type QueueOpData = (Option<MbMessage>, Option<TimerStorage>);
 
 impl Proposal {
     fn conf_change(cc: &ConfChange) -> (Self, Receiver<ProposalData>) {
@@ -719,7 +741,7 @@ fn propose(raft_group: &mut RawNode<MemStorage>, proposal: &mut Proposal) {
     let last_index2 = raft_group.raft.raft_log.last_index() + 1;
     if last_index2 == last_index1 {
         // Propose failed, don't forget to respond to the client.
-        proposal.propose_success.send((None, None)).unwrap();
+        proposal.propose_success.send(ProposalData::QueueOpResult((None, None))).unwrap();
         // proposal.propose_success.send(false).unwrap();
     } else {
         proposal.proposed = last_index1;
@@ -735,7 +757,8 @@ fn add_all_followers(proposals: &Mutex<VecDeque<Proposal>>, num_nodes: u64) {
         loop {
             let (proposal, rx) = Proposal::conf_change(&conf_change);
             proposals.lock().unwrap().push_back(proposal);
-            if rx.recv().unwrap().0.is_none() {
+            let res = rx.recv().unwrap();
+            if let ProposalData::QueueOpResult((None, _)) = res {
                 break;
             }
             thread::sleep(Duration::from_millis(100));

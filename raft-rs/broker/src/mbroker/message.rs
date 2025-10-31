@@ -26,9 +26,9 @@ impl Message {
     }
 
     pub fn change_payload<S: Serialize>(&mut self, payload: S) {
-        let payload_size = size_of::<S>();
-        assert!(payload_size <= MSG_PAYLOAD_LEN);
         let raw_payload = bincode::serialize(&payload).unwrap();
+        let payload_size = raw_payload.len();
+        assert!(payload_size <= MSG_PAYLOAD_LEN);
         self.raw_msg[MSG_PAYLOAD_START_INDEX..(MSG_PAYLOAD_START_INDEX + payload_size)]
             .as_mut()
             .copy_from_slice(&raw_payload)
@@ -127,6 +127,7 @@ pub enum MessageType {
     HeloAck,
     StatReq,
     StatRes,
+    Nack,
 }
 
 impl MessageType {
@@ -163,6 +164,7 @@ impl TryFrom<c_uint> for MessageType {
             10 => Ok(MessageType::HeloAck),
             11 => Ok(MessageType::StatReq),
             12 => Ok(MessageType::StatRes),
+            13 => Ok(MessageType::Nack),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Invalid number for Message Type",

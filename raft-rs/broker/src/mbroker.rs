@@ -14,7 +14,7 @@ use message::{Message, MessageHeader, MessageType, RaftTimestampType};
 use network::{NetService, NetStream};
 use nix::sys::epoll::*;
 use queue::{MQueue, MQueuePool};
-use raftrs::{start_raft, Proposal};
+use raftrs::{start_raft, Proposal, ProposalData};
 use serde::Serialize;
 use simplelog::{LevelFilter, WriteLogger};
 use std::collections::VecDeque;
@@ -196,16 +196,24 @@ fn treat_client(
                         // FIXME: append される node_id は決め打ちでなく Raft インスタンスの node id であるべき
                         timer.append(msg.header.id, 1, 1, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                         proposals.lock().unwrap().push_back(proposal);
-                        let (_, raft_timers) = rx.recv().unwrap();
-                        if let Some(raft_timers) = raft_timers {
-                            timer.merge_from(raft_timers);
-                        }
-                        // Raft 処理終了後 109
-                        // FIXME: append される node_id は決め打ちでなく Raft インスタンスの node id であるべき
-                        timer.append(msg.header.id, 1, 1, RaftTimestampType::AfterRaftProcessComplete, time_now());
+                        match rx.recv().unwrap() {
+                            ProposalData::QueueOpResult((_, raft_timers)) => {
+                                if let Some(raft_timers) = raft_timers {
+                                    timer.merge_from(raft_timers);
+                                }
+                                // Raft 処理終了後 109
+                                // FIXME: append される node_id は決め打ちでなく Raft インスタンスの node id であるべき
+                                timer.append(msg.header.id, 1, 1, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
-                        stream.send_msg(&mut ack).unwrap();
-                        _counter += 1;
+                                stream.send_msg(&mut ack).unwrap();
+                                _counter += 1;
+                            }
+                            ProposalData::LeaderInfo(leader_addr) => {
+                                let mut nack = into_nack(msg, myid, leader_addr);
+                                stream.send_msg(&mut nack).unwrap();
+                                continue;
+                            }
+                        }
                     }
                     MessageType::RecvReq => {
                         // do nothing
@@ -215,14 +223,22 @@ fn treat_client(
                         // // タイムスタンプ Raftにメッセージ譲渡 101
                         // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                         proposals.lock().unwrap().push_back(proposal);
-                        let (_, _raft_timers) = rx.recv().unwrap();
-                        // if let Some(raft_timers) = raft_timers {
-                        //     timer.merge_from(raft_timers);
-                        // }
-                        // // Raft 処理終了後 109
-                        // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+                        match rx.recv().unwrap() {
+                            ProposalData::QueueOpResult((_, _raft_timers)) => {
+                                // if let Some(raft_timers) = raft_timers {
+                                //     timer.merge_from(_raft_timers);
+                                // }
+                                // // Raft 処理終了後 109
+                                // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
-                        stream.send_msg(&mut into_normal_ack(msg.clone(), myid)).unwrap();
+                                stream.send_msg(&mut into_normal_ack(msg.clone(), myid)).unwrap();
+                            }
+                            ProposalData::LeaderInfo(leader_addr) => {
+                                let mut nack = into_nack(msg, myid, leader_addr);
+                                stream.send_msg(&mut nack).unwrap();
+                                continue;
+                            }
+                        }
 
                         if is_ready_to_send(&mq_pool.read().unwrap().find_by_id(msg.header.saddr).unwrap().clone().read().unwrap()) {
                             msg.header.change_msg_type(MessageType::PushReq);
@@ -231,19 +247,27 @@ fn treat_client(
                             // // タイムスタンプ Raftにメッセージ譲渡 101
                             // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                             proposals.lock().unwrap().push_back(proposal);
-                            let (res, _raft_timers) = rx.recv().unwrap();
-                            let mut res = match res {
-                                Some(msg) => msg,
-                                None => continue,
-                            };
-                            // if let Some(raft_timers) = raft_timers {
-                            //     timer.merge_from(raft_timers);
-                            // }
-                            // // Raft 処理終了後 109
-                            // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
-
-                            timer.append(res.header.id, 0, 0,  res.header.msg_type(), time_now()); //7
-                            stream.send_msg(&mut res).unwrap();
+                            match rx.recv().unwrap() {
+                                ProposalData::QueueOpResult((res, _raft_timers)) => {
+                                    let mut res = match res {
+                                        Some(msg) => msg,
+                                        None => continue,
+                                    };
+                                    // if let Some(raft_timers) = raft_timers {
+                                    //     timer.merge_from(raft_timers);
+                                    // }
+                                    // // Raft 処理終了後 109
+                                    // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+                                    timer.append(res.header.id, 0, 0,  res.header.msg_type(), time_now()); //7
+                                    stream.send_msg(&mut res).unwrap();
+                                }
+                                ProposalData::LeaderInfo(leader_addr) => {
+                                    println!("Not leader. leader_addr: {leader_addr}");
+                                    let mut nack = into_nack(msg, myid, leader_addr);
+                                    stream.send_msg(&mut nack).unwrap();
+                                    continue;
+                                }
+                            }
                         }
                     }
                     MessageType::PushAck => {
@@ -254,16 +278,24 @@ fn treat_client(
                         // // タイムスタンプ Raftにメッセージ譲渡 101
                         // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                         proposals.lock().unwrap().push_back(proposal);
-                        let (_, _raft_timers) = rx.recv().unwrap();
-                        // if let Some(raft_timers) = raft_timers {
-                        //     timer.merge_from(raft_timers);
-                        // }
-                        // // Raft 処理終了後 109
-                        // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+                        match rx.recv().unwrap() {
+                            ProposalData::QueueOpResult((_, _raft_timers)) => {
+                                // if let Some(raft_timers) = _raft_timers {
+                                //     timer.merge_from(raft_timers);
+                                // }
+                                // // Raft 処理終了後 109
+                                // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
-                        client_id = msg.header.saddr;
-                        let mut ack = into_normal_ack(msg, myid);
-                        stream.send_msg(&mut ack).unwrap();
+                                client_id = msg.header.saddr;
+                                let mut ack = into_normal_ack(msg, myid);
+                                stream.send_msg(&mut ack).unwrap();
+                            }
+                            ProposalData::LeaderInfo(leader_addr) => {
+                                let mut nack = into_nack(msg, myid, leader_addr);
+                                stream.send_msg(&mut nack).unwrap();
+                                continue;
+                            }
+                        }
                     }
                     MessageType::StatReq => {
                         let queue_stat = {
@@ -294,19 +326,27 @@ fn treat_client(
                     // // タイムスタンプ Raftにメッセージ譲渡 101
                     // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
                     proposals.lock().unwrap().push_back(proposal);
-                    let (res, _raft_timers) = rx.recv().unwrap();
-                    let mut res = match res {
-                        Some(msg) => msg,
-                        None => continue,
-                    };
-                    // if let Some(raft_timers) = raft_timers {
-                    //     timer.merge_from(raft_timers);
-                    // }
-                    // // Raft 処理終了後 109
-                    // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
+                    match rx.recv().unwrap() {
+                        ProposalData::QueueOpResult((res, _raft_timers)) => {
+                            let mut res = match res {
+                                Some(msg) => msg,
+                                None => continue,
+                            };
+                            // if let Some(raft_timers) = raft_timers {
+                            //     timer.merge_from(raft_timers);
+                            // }
+                            // // Raft 処理終了後 109
+                            // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
-                    timer.append(res.header.id, 0, 0, res.header.msg_type(), time_now()); //7
-                    stream.send_msg(&mut res).unwrap();
+                            timer.append(res.header.id, 0, 0,  res.header.msg_type(), time_now()); //7
+                            stream.send_msg(&mut res).unwrap();
+                        }
+                        ProposalData::LeaderInfo(leader_addr) => {
+                            let mut nack = into_nack(msg, myid, leader_addr);
+                            stream.send_msg(&mut nack).unwrap();
+                            continue;
+                        }
+                    }
                 }
             }
             _counter += 1;
@@ -330,6 +370,19 @@ fn into_ack<S: Serialize>(mut msg: Message, myid: c_uint, payload: S) -> Message
     let current_header = msg.header;
     let new_header = MessageHeader::new(
         current_header.msg_type().ack().unwrap(),
+        myid,
+        current_header.saddr,
+        ACK_MSG_ID,
+    );
+    msg.header = new_header;
+    msg.change_payload(payload);
+    msg
+}
+
+fn into_nack<S: Serialize>(mut msg: Message, myid: c_uint, payload: S) -> Message {
+    let current_header = msg.header;
+    let new_header = MessageHeader::new(
+        MessageType::Nack,
         myid,
         current_header.saddr,
         ACK_MSG_ID,

@@ -39,6 +39,7 @@ const char* msg_type_to_string(int msg_type)
   case MSG_HELO_ACK: return MSG_SYM_TO_STRING(MSG_HELO_ACK);
   case MSG_STAT_REQ: return MSG_SYM_TO_STRING(MSG_STAT_REQ);
   case MSG_STAT_RES: return MSG_SYM_TO_STRING(MSG_STAT_RES);
+  case MSG_NACK:     return MSG_SYM_TO_STRING(MSG_NACK);
   default: return "MSG_UNKNOWN";
   }
 }
@@ -54,6 +55,10 @@ bool msg_is_ack(struct message *msg) {
   default:
     return false;
   }
+}
+
+bool msg_is_nack(struct message *msg) {
+  return msg->hdr.msg_type == MSG_NACK;
 }
 
 void msg_dump(struct message *msg)

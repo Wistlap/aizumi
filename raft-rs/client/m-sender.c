@@ -9,7 +9,7 @@
 
 #define PROG_NAME "m-sender"
 
-int send_logsignals(int fd, int myid, int *receiver_ids, int npackets, void *payload) {
+struct network_result send_logsignals(int fd, int myid, int *receiver_ids, int npackets, void *payload) {
   struct message smsg;
   struct message ack;
   union status *stat = malloc(sizeof(union status));
@@ -17,46 +17,80 @@ int send_logsignals(int fd, int myid, int *receiver_ids, int npackets, void *pay
   memcpy(smsg.payload, &stat_type, sizeof(int));
   for (int i=0; i<npackets; i++) {
     msg_fill_hdr(&smsg, MSG_STAT_REQ, myid, 5000, 0);
-    net_send_msg(fd, &smsg);
-    net_recv_msg(fd, &ack);
+
+    struct network_result net_res = net_send_msg(fd, &smsg);
+    if (net_res.status != NETWORK_STATUS_SUCCESS) {
+      return net_res;
+    }
+    net_res = net_recv_msg(fd, &ack);
+    if (net_res.status != NETWORK_STATUS_SUCCESS) {
+      return net_res;
+    }
+
     memcpy(stat, ack.payload, sizeof(union status));
     logger_info("%d done\n", i);
   }
-  return 0;
+  return make_network_result(NETWORK_STATUS_SUCCESS, 0, NULL);
 }
 
-int register_myid(int fd, int myid) {
+struct network_result register_myid(int fd, int myid) {
   struct message msg;
-  net_send_msg(fd, msg_fill_hdr(&msg, MSG_HELO_REQ, myid, MSG_ADDR_BROKER, 0));
-  return net_recv_ack(fd, NULL, MSG_HELO_ACK, msg.hdr.id);
+  struct network_result net_res = net_send_msg(fd, msg_fill_hdr(&msg, MSG_HELO_REQ, myid, MSG_ADDR_BROKER, 0));
+  printf("msg id sent: %d\n", msg.hdr.id);
+  if (net_res.status != NETWORK_STATUS_SUCCESS) {
+    return net_res;
+  }
+  net_res = net_recv_ack(fd, NULL, MSG_HELO_ACK, msg.hdr.id);
+  return net_res;
 }
 
-void send_stat_req(int fd, int myid, int stat_type) {
+struct network_result send_stat_req(int fd, int myid, int stat_type) {
   struct message smsg;
   struct message ack;
   union status *stat = malloc(sizeof(union status));
   memcpy(smsg.payload, &stat_type, sizeof(int));
   msg_fill_hdr(&smsg, MSG_STAT_REQ, myid, MSG_ADDR_BROKER, 0);
-  net_send_msg(fd, &smsg);
-  net_recv_msg(fd, &ack);
+
+  struct network_result net_res = net_send_msg(fd, &smsg);
+  if (net_res.status != NETWORK_STATUS_SUCCESS) {
+    return net_res;
+  }
+  net_res = net_recv_msg(fd, &ack);
+  if (net_res.status != NETWORK_STATUS_SUCCESS) {
+    return net_res;
+  }
+
   memcpy(stat, ack.payload, sizeof(union status));
   logger_info("sum_queues: %d, max_messages: %d, sum_messages: %d\n", stat->queue_stat.sum_queues, stat->queue_stat.max_messages, stat->queue_stat.sum_messages);
+  return make_network_result(NETWORK_STATUS_SUCCESS, 0, NULL);
 }
 
-int send_messages(int fd, int myid, int *receiver_ids, int npackets, void *payload) {
+struct network_result send_messages(int fd, int myid, int *receiver_ids, int *id_pos, int npackets, int *done_packets, void *payload) {
   struct message smsg;
   int *orig_receiver_ids = receiver_ids;
-  for (int i = 0; i < npackets; i++) {
+  while (*done_packets < npackets) {
     receiver_ids = orig_receiver_ids;
+    receiver_ids += *id_pos;
     while (*receiver_ids >= 0) {
       msg_fill_hdr(&smsg, MSG_SEND_REQ, myid, *receiver_ids, 0);
       msg_fill_sprintf(&smsg, "Hello from sender %d", myid);
-      net_send_msg(fd, &smsg);
-      net_recv_ack(fd, NULL, MSG_SEND_ACK, smsg.hdr.id);
-    receiver_ids++;
+      printf("msg id sent: %d to receiver %d\n", smsg.hdr.id, *receiver_ids);
+      struct network_result net_res = net_send_msg(fd, &smsg);
+      if (net_res.status != NETWORK_STATUS_SUCCESS) {
+        return net_res;
+      }
+      net_res = net_recv_ack(fd, NULL, MSG_SEND_ACK, smsg.hdr.id);
+      if (net_res.status != NETWORK_STATUS_SUCCESS) {
+        return net_res;
+      }
+      receiver_ids++;
+      (*id_pos)++;
     }
+    *id_pos = 0;
+    (*done_packets)++;
+    printf("%d packets done\n", *done_packets);
   }
-  return 0;
+  return make_network_result(NETWORK_STATUS_SUCCESS, 0, NULL);
 }
 
 void usage_and_exit(int status)
@@ -69,7 +103,8 @@ void usage_and_exit(int status)
 
 int main(int argc, char *argv[])
 {
-  struct cli_option opt = CLI_OPTION_DEFAULT; // clone default
+  struct cli_option opt;
+  init_cli_option(&opt); // clone default
   opt.myid = 10000; // default my address
 
   if (cli_parse_option(argc, argv, &opt) < 0 || opt.receivers[0] == -1)
@@ -80,7 +115,7 @@ int main(int argc, char *argv[])
   logger_setup_pid_file(opt.pid_file, PROG_NAME);
   logger_tinfo("* ", " %s started.\n", PROG_NAME);
 
-  int fd = net_connect(opt.broker_host, opt.broker_port);
+  int fd = net_connect_recursive(opt.broker_host, opt.broker_port, (const char **)opt.broker_replicas,opt.broker_replicas_count);
 
   if (fd < 0) {
     logger_error("failed to connect %s:%s\n",
@@ -88,8 +123,18 @@ int main(int argc, char *argv[])
     exit(-1);
   }
 
-  int n = register_myid(fd, opt.myid);
+  struct network_result net_res = register_myid(fd, opt.myid);
+  while (net_res.status != NETWORK_STATUS_SUCCESS) {
+    logger_info("failed to register myid %d\n. Now retry", opt.myid);
+    close(fd);
+    sleep(1);
 
+    fd = net_reconnect(net_res, opt);
+    net_res = register_myid(fd, opt.myid);
+  }
+  printf("registered myid %d successfully.\n", opt.myid);
+
+  int n = net_res.data;
   if (n != MSG_TOTAL_LEN) {
     logger_error("could not registered.\n");
     close(fd);
@@ -99,13 +144,37 @@ int main(int argc, char *argv[])
   // send messages for each receiver up to amount, with empty payload
   cli_fdump(logger_fp(LOG_DEBUG), &opt);
 
+  int recvs_pos = 0;
+  int done_packets = 0;
   char payload[MSG_PAYLOAD_LEN] = "Hello";
   // send message or send logsignal
   if (opt.logsignal == 1) {
-    send_logsignals(fd, opt.myid, &opt.receivers[0], opt.msg_amount, payload);
+    net_res = send_logsignals(fd, opt.myid, &opt.receivers[0], opt.msg_amount, payload);
+    while (net_res.status != NETWORK_STATUS_SUCCESS) {
+      close(fd);
+      sleep(1);
+
+      fd = net_reconnect(net_res, opt);
+      net_res = send_logsignals(fd, opt.myid, &opt.receivers[0], opt.msg_amount, payload);
+    }
   } else {
-    send_messages(fd, opt.myid, &opt.receivers[0], opt.msg_amount, payload);
-    send_stat_req(fd, opt.myid, QUEUE_STAT);
+    net_res = send_messages(fd, opt.myid, &opt.receivers[0], &recvs_pos, opt.msg_amount, &done_packets, payload);
+    while (net_res.status != NETWORK_STATUS_SUCCESS) {
+      close(fd);
+      sleep(1);
+
+      fd = net_reconnect(net_res, opt);
+      net_res = send_messages(fd, opt.myid, &opt.receivers[0], &recvs_pos, opt.msg_amount, &done_packets, payload);
+    }
+
+    net_res = send_stat_req(fd, opt.myid, QUEUE_STAT);
+    while (net_res.status != NETWORK_STATUS_SUCCESS) {
+      close(fd);
+      sleep(1);
+
+      fd = net_reconnect(net_res, opt);
+      net_res = send_stat_req(fd, opt.myid, QUEUE_STAT);
+    }
   }
   close(fd);
 

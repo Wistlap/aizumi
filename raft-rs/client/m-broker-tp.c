@@ -97,7 +97,8 @@ void *treat_client(void *arg_ptr)
         }
       } else {
 
-        if ((n = net_recv_msg(client_fd, &msg)) != MSG_TOTAL_LEN) {
+        struct network_result net_res = net_recv_msg(client_fd, &msg);
+        if ((n = net_res.data) != MSG_TOTAL_LEN) {
 //          break;
 //closeの処理をここで入れる キューからもfdを消す
           close(client_fd);
@@ -359,7 +360,8 @@ int main(int argc, char *argv[])
 
   logger_str("id, msg_type, tsc");
 
-  int fd = net_create_service(opt.broker_host, opt.broker_port);
+  struct network_result net_res = net_create_service(opt.broker_host, opt.broker_port);
+  int fd = net_res.data;
   queue_pool_list = queue_pool_create();
   if (fd < 0) {
     logger_error("failed to bind %s:%s\n",

@@ -15,7 +15,19 @@ struct cli_option CLI_OPTION_DEFAULT = {
   .trans_count = 6000,
   .receivers = {-1},
   .logsignal = 0,
+  .broker_replicas = NULL,
+  .broker_replicas_count = 0,
 };
+
+void init_cli_option(struct cli_option *opt)
+{
+  *opt = CLI_OPTION_DEFAULT;
+  opt->broker_replicas_count = 1;
+  opt->broker_replicas = malloc(sizeof(char*) * opt->broker_replicas_count);
+  if (!opt->broker_replicas) exit(1); // エラーチェック
+  opt->broker_replicas[0] = strdup("localhost:5555");
+  if (!opt->broker_replicas[0]) exit(1);
+}
 
 // "100"     -> head = 100, tail = 100
 // "100-200" -> head = 100, tail = 200
@@ -54,6 +66,11 @@ void cli_fdump(FILE *fp, struct cli_option *opt)
   fprintf(fp, "debug_level: %d\n", opt->debug_level);
   fprintf(fp, "broker_host: %s\n", opt->broker_host);
   fprintf(fp, "broker_port: %s\n", opt->broker_port);
+  fprintf(fp, "broker_replicas: ");
+  for (int i = 0; i < opt->broker_replicas_count; i++) {
+    fprintf(fp, "%s ", opt->broker_replicas[i]);
+  }
+  fprintf(fp, "\n");
   fprintf(fp, "broker_timeout: %d\n", opt->broker_timeout);
   fprintf(fp, "broker_threads: %d\n", opt->broker_threads);
   fprintf(fp, "msg_amount: %d\n", opt->msg_amount);
@@ -79,7 +96,7 @@ int cli_parse_option(int argc, char * const argv[], struct cli_option *parsed_op
     parsed_opt->receivers[i] = -1;
   }
 
-  while ((opt = getopt(argc, argv, "b:c:d:l:m:n:p:t:u:x:s:")) != -1) {
+  while ((opt = getopt(argc, argv, "b:c:d:l:m:n:p:r:t:u:x:s:")) != -1) {
     switch (opt) {
     case 'b':
       OPT_SET_STRING(parsed_opt->broker_host, optarg);
@@ -109,6 +126,23 @@ int cli_parse_option(int argc, char * const argv[], struct cli_option *parsed_op
       break;
     case 'p':
       OPT_SET_STRING(parsed_opt->pid_file, optarg);
+      break;
+    case 'r':
+      {
+        parsed_opt->broker_replicas_count=0;
+        char *tmp = strdup(optarg);
+        if (!tmp) return -1;
+        char *token = strtok(tmp, ",");
+        while (token) {
+            char **new_replicas = realloc(parsed_opt->broker_replicas, sizeof(char*) * (parsed_opt->broker_replicas_count + 1));
+            if (!new_replicas) { free(tmp); return -1; }
+            parsed_opt->broker_replicas = new_replicas;
+            parsed_opt->broker_replicas[parsed_opt->broker_replicas_count] = strdup(token);
+            parsed_opt->broker_replicas_count++;
+            token = strtok(NULL, ",");
+        }
+        free(tmp);
+      }
       break;
     case 't':
       OPT_SET_NUMBER(parsed_opt->broker_timeout, optarg);
