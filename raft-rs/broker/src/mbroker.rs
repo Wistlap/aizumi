@@ -286,11 +286,13 @@ fn treat_client(
                                 // // Raft 処理終了後 109
                                 // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
+                                println!("Leader: New client connected successfully.");
                                 client_id = msg.header.saddr;
                                 let mut ack = into_normal_ack(msg, myid);
                                 stream.send_msg(&mut ack).unwrap();
                             }
                             ProposalData::LeaderInfo(leader_addr) => {
+                                println!("Not leader: New client connected. Encourage to connect to leader at {leader_addr}.");
                                 let mut nack = into_nack(msg, myid, leader_addr);
                                 stream.send_msg(&mut nack).unwrap();
                                 continue;

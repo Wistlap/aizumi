@@ -36,7 +36,7 @@ struct network_result send_logsignals(int fd, int myid, int *receiver_ids, int n
 struct network_result register_myid(int fd, int myid) {
   struct message msg;
   struct network_result net_res = net_send_msg(fd, msg_fill_hdr(&msg, MSG_HELO_REQ, myid, MSG_ADDR_BROKER, 0));
-  printf("msg id sent: %d\n", msg.hdr.id);
+  // printf("msg id sent: %d\n", msg.hdr.id);
   if (net_res.status != NETWORK_STATUS_SUCCESS) {
     return net_res;
   }
@@ -74,7 +74,7 @@ struct network_result send_messages(int fd, int myid, int *receiver_ids, int *id
     while (*receiver_ids >= 0) {
       msg_fill_hdr(&smsg, MSG_SEND_REQ, myid, *receiver_ids, 0);
       msg_fill_sprintf(&smsg, "Hello from sender %d", myid);
-      printf("msg id sent: %d to receiver %d\n", smsg.hdr.id, *receiver_ids);
+      // printf("msg id sent: %d to receiver %d\n", smsg.hdr.id, *receiver_ids);
       struct network_result net_res = net_send_msg(fd, &smsg);
       if (net_res.status != NETWORK_STATUS_SUCCESS) {
         return net_res;
@@ -88,7 +88,7 @@ struct network_result send_messages(int fd, int myid, int *receiver_ids, int *id
     }
     *id_pos = 0;
     (*done_packets)++;
-    printf("%d packets done\n", *done_packets);
+    // printf("%d packets done\n", *done_packets);
   }
   return make_network_result(NETWORK_STATUS_SUCCESS, 0, NULL);
 }
@@ -132,7 +132,7 @@ int main(int argc, char *argv[])
     fd = net_reconnect(net_res, opt);
     net_res = register_myid(fd, opt.myid);
   }
-  printf("registered myid %d successfully.\n", opt.myid);
+  // printf("registered myid %d successfully.\n", opt.myid);
 
   int n = net_res.data;
   if (n != MSG_TOTAL_LEN) {

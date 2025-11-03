@@ -234,7 +234,7 @@ struct network_result net_recv_ack(int fd, struct message *msg, int expected_msg
 
     strncpy(net_res.hint, hint, MSG_PAYLOAD_LEN - 1);
     net_res.hint[MSG_PAYLOAD_LEN - 1] = '\0';
-    printf("Redirect hint: %s\n", net_res.hint);
+    printf("Client: Received redirect hint: %s\n", net_res.hint);
     return net_res;
   }
 

@@ -175,6 +175,7 @@ fn run_node(
     // Channels for receiving messages from other nodes.
     let (recv_tx, recv_rx) = mpsc::channel();
     let mut send_txs: BTreeMap<u64, Sender<Vec<Message>>> = BTreeMap::new();
+    // NOTE: ノード切断時に 適切に node_addrs を更新できるか？
     let mut node_addrs: BTreeMap<u64, String> = BTreeMap::new();
     if ! node.streams.is_empty() {
         let keys: Vec<u64> = node.streams.keys().cloned().collect();
