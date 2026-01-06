@@ -118,4 +118,11 @@ impl<T> Queue<T> {
         let pos = self.queue.iter().position(predicate);
         pos.map(|pos| self.queue.remove(pos).unwrap())
     }
+
+    pub fn get_front(&self) -> Option<T>
+    where
+        T: Clone,
+    {
+        self.queue.front().cloned()
+    }
 }

@@ -211,7 +211,7 @@ fn treat_client(
                             ProposalData::LeaderInfo(leader_addr) => {
                                 let mut nack = into_nack(msg, myid, leader_addr);
                                 stream.send_msg(&mut nack).unwrap();
-                                continue;
+                                break;
                             }
                         }
                     }
@@ -219,6 +219,7 @@ fn treat_client(
                         // do nothing
                     }
                     MessageType::FreeReq => {
+                        // println!("Client {}: FreeReq received", msg.header.saddr);
                         let (proposal, rx) = Proposal::normal(msg.clone());
                         // // タイムスタンプ Raftにメッセージ譲渡 101
                         // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
@@ -236,7 +237,7 @@ fn treat_client(
                             ProposalData::LeaderInfo(leader_addr) => {
                                 let mut nack = into_nack(msg, myid, leader_addr);
                                 stream.send_msg(&mut nack).unwrap();
-                                continue;
+                                break;
                             }
                         }
 
@@ -260,12 +261,19 @@ fn treat_client(
                                     // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
                                     timer.append(res.header.id, 0, 0,  res.header.msg_type(), time_now()); //7
                                     stream.send_msg(&mut res).unwrap();
+
+                                    // waiting_queue から delivered_queue へメッセージを移動
+                                    // FIXME: 暫定的に PushAck メッセージを利用，適切なものに変える
+                                    msg.header.change_msg_type(MessageType::PushAck);
+                                    let (proposal, rx) = Proposal::normal(msg);
+                                    proposals.lock().unwrap().push_back(proposal);
+                                    rx.recv().unwrap();
                                 }
                                 ProposalData::LeaderInfo(leader_addr) => {
                                     println!("Not leader. leader_addr: {leader_addr}");
                                     let mut nack = into_nack(msg, myid, leader_addr);
                                     stream.send_msg(&mut nack).unwrap();
-                                    continue;
+                                    break;
                                 }
                             }
                         }
@@ -286,16 +294,16 @@ fn treat_client(
                                 // // Raft 処理終了後 109
                                 // timer.append(msg.header.id, RaftTimestampType::AfterRaftProcessComplete, time_now());
 
-                                println!("Leader: New client connected successfully.");
                                 client_id = msg.header.saddr;
+                                println!("Leader: New client {client_id} connected successfully.");
                                 let mut ack = into_normal_ack(msg, myid);
                                 stream.send_msg(&mut ack).unwrap();
                             }
                             ProposalData::LeaderInfo(leader_addr) => {
-                                println!("Not leader: New client connected. Encourage to connect to leader at {leader_addr}.");
+                                // println!("Not leader: New client connected. Encourage to connect to leader at {leader_addr}.");
                                 let mut nack = into_nack(msg, myid, leader_addr);
                                 stream.send_msg(&mut nack).unwrap();
-                                continue;
+                                break;
                             }
                         }
                     }
@@ -319,11 +327,14 @@ fn treat_client(
                 mq_pool.find_by_id(client_id).cloned()
             };
             if let Some(mqueue) = mqueue {
+                // println!("Client {client_id}: timeout!");
                 // let mut mqueue = mqueue.write().unwrap();
+                
                 if is_ready_to_send(&mqueue.read().unwrap()) {
+                    println!("Client {client_id}: checking message queue...");
                     // FIXME: 毎回異なるidで作成されるべき
                     // id 0 のメッセージが複数作られるため，Raftの 処理時間の算出に影響する
-                    let msg = Message::new(MessageHeader::new(MessageType::PushReq, client_id as c_uint, 0 as c_uint, 0 as c_uint));
+                    let mut msg = Message::new(MessageHeader::new(MessageType::PushReq, client_id as c_uint, 0 as c_uint, 0 as c_uint));
                     let (proposal, rx) = Proposal::normal(msg.clone());
                     // // タイムスタンプ Raftにメッセージ譲渡 101
                     // timer.append(msg.header.id, RaftTimestampType::BeforeProposalEnqueue, time_now()); //101
@@ -342,11 +353,18 @@ fn treat_client(
 
                             timer.append(res.header.id, 0, 0,  res.header.msg_type(), time_now()); //7
                             stream.send_msg(&mut res).unwrap();
+
+                            // waiting_queue から delivered_queue へメッセージを移動
+                            // FIXME: 暫定的に PushAck メッセージを利用，適切なものに変える
+                            msg.header.change_msg_type(MessageType::PushAck);
+                            let (proposal, rx) = Proposal::normal(msg);
+                            proposals.lock().unwrap().push_back(proposal);
+                            rx.recv().unwrap();
                         }
                         ProposalData::LeaderInfo(leader_addr) => {
                             let mut nack = into_nack(msg, myid, leader_addr);
                             stream.send_msg(&mut nack).unwrap();
-                            continue;
+                            break;
                         }
                     }
                 }
@@ -395,6 +413,7 @@ fn into_nack<S: Serialize>(mut msg: Message, myid: c_uint, payload: S) -> Messag
 }
 
 fn is_ready_to_send(mqueue: &MQueue) -> bool {
+    // println!("Debug: waiting is empty? {}, delivered is empty? {}", mqueue.waiting_queue.is_empty(), mqueue.delivered_queue.is_empty());
     (!mqueue.waiting_queue.is_empty()) && (mqueue.delivered_queue.is_empty())
 }
 

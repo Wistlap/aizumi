@@ -44,6 +44,35 @@ struct network_result client_register(int fd, int myid, int broker_id) {
   return net_res;
 }
 
+// Reconnect and reregister myid
+// Returns new fd
+// Need close old fd by caller
+int reregister_myid(int myid, struct cli_option opt, struct network_result net_res) {
+  int fd;
+  while (1) {
+    sleep(1);
+    // reconnect
+    fd = net_reconnect(net_res, opt).data;
+    if (fd < 0) {
+      net_res.status = NETWORK_STATUS_ERR_CONNECT;
+      continue;
+    }
+    // reregister
+    net_res = client_register(fd, myid, MSG_ADDR_BROKER);
+    if (net_res.status == NETWORK_STATUS_ERR_DO_REDIRECT) {
+      close(fd);
+      continue;
+    } else if (net_res.status != NETWORK_STATUS_SUCCESS || net_res.data != MSG_TOTAL_LEN) {
+      close(fd);
+      net_res.status = NETWORK_STATUS_ERR_CONTENT;
+      continue;
+    }
+    // success
+    break;
+  }
+  return fd;
+}
+
 int update_epoll_fd(int *epfd, int old_fd, int new_fd)
 {
   struct epoll_event ev;
@@ -99,22 +128,20 @@ int client_event_loop(int *fd, struct cli_option opt, struct event_handlers *hd,
 
     struct network_result net_res = net_recv_msg(*fd, &msg);
     while (net_res.status != NETWORK_STATUS_SUCCESS) {
-      int new_fd = net_reconnect(net_res, opt);
-      if (new_fd < 0) {
-        logger_error("failed to reconnect\n");
-        break;
-      }
+      logger_warn("debug: not recv msg\n");
+      int new_fd = reregister_myid(opt.myid, opt, net_res);
       update_epoll_fd(&epfd, *fd, new_fd);
       close(*fd);
       *fd = new_fd;
 
+      // continue しないと 次の受信を感知できない？
       net_res = net_recv_msg(*fd, &msg);
     }
 
     n = net_res.data;
     if (n != MSG_TOTAL_LEN) {
       // connection closed
-      // printf("net_recv_msg failed: %d\n", n);
+      printf("net_recv_msg failed: %d\n", n);
       break;
     }
 
@@ -167,44 +194,45 @@ int message_arrived(int *epfd, int *fd, void *arg, struct cli_option opt)
   struct network_result net_res = net_send_ack(*fd, msg, myid);
   while (net_res.status != NETWORK_STATUS_SUCCESS)
   {
-    int new_fd = net_reconnect(net_res, opt);
-    if (new_fd < 0) {
-      logger_error("failed to reconnect\n");
-      return -1;
-    }
+    logger_warn("debug: not send PushAck \n");
+    int new_fd = reregister_myid(opt.myid, opt, net_res);
     update_epoll_fd(epfd, *fd, new_fd);
     close(*fd);
     *fd = new_fd;
     net_res = net_send_ack(*fd, msg, myid);
   }
+  // logger_warn("debug: send PushAck \n");
 
   net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_FREE_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
   while (net_res.status != NETWORK_STATUS_SUCCESS)
   {
-    int new_fd = net_reconnect(net_res, opt);
-    if (new_fd < 0) {
-      logger_error("failed to reconnect\n");
-      return -1;
-    }
+    logger_warn("debug: not send FreeReq \n");
+    int new_fd = reregister_myid(opt.myid, opt, net_res);
     update_epoll_fd(epfd, *fd, new_fd);
     close(*fd);
     *fd = new_fd;
     net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_FREE_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
   }
+  // logger_warn("debug: send FreeReq \n");
 
   net_res = net_recv_ack(*fd, NULL, MSG_FREE_ACK, msg->hdr.id);
   while (net_res.status != NETWORK_STATUS_SUCCESS)
   {
-    int new_fd = net_reconnect(net_res, opt);
-    if (new_fd < 0) {
-      logger_error("failed to reconnect\n");
-      return -1;
+    if (net_res.status == NETWORK_STATUS_ERR_CONTENT) {
+      logger_warn("debug: not recv FreeAck, retrying send FreeReq \n");
+      net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_FREE_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
+      net_res = net_recv_ack(*fd, NULL, MSG_FREE_ACK, msg->hdr.id);
+      continue;
     }
+    logger_warn("debug: not recv FreeAck \n");
+    int new_fd = reregister_myid(opt.myid, opt, net_res);
     update_epoll_fd(epfd, *fd, new_fd);
     close(*fd);
     *fd = new_fd;
+    net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_FREE_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
     net_res = net_recv_ack(*fd, NULL, MSG_FREE_ACK, msg->hdr.id);
   }
+  // logger_warn("debug: recv FreeAck \n");
 
   if (count % 10000 == 0) logger_info("%d received, message: %s, id: %d\n", count, msg->payload, msg->hdr.id);
   count++;
@@ -213,11 +241,8 @@ int message_arrived(int *epfd, int *fd, void *arg, struct cli_option opt)
     net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_STAT_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
     while (net_res.status != NETWORK_STATUS_SUCCESS)
     {
-      int new_fd = net_reconnect(net_res, opt);
-      if (new_fd < 0) {
-        logger_error("failed to reconnect\n");
-        return -1;
-      }
+      logger_warn("debug: not send StatReq \n");
+      int new_fd = reregister_myid(opt.myid, opt, net_res);
       update_epoll_fd(epfd, *fd, new_fd);
       close(*fd);
       *fd = new_fd;
@@ -227,11 +252,14 @@ int message_arrived(int *epfd, int *fd, void *arg, struct cli_option opt)
     net_res = net_recv_ack(*fd, NULL, MSG_STAT_RES, msg->hdr.id);
     while (net_res.status != NETWORK_STATUS_SUCCESS)
     {
-      int new_fd = net_reconnect(net_res, opt);
-      if (new_fd < 0) {
-        logger_error("failed to reconnect\n");
-        return -1;
+      if (net_res.status == NETWORK_STATUS_ERR_CONTENT) {
+        logger_warn("debug: not recv StatRes, retrying send StatReq \n");
+        net_res = net_send_msg(*fd, msg_fill_hdr(msg, MSG_STAT_REQ, myid, MSG_ADDR_BROKER, msg->hdr.id));
+        net_res = net_recv_ack(*fd, NULL, MSG_STAT_RES, msg->hdr.id);
+        continue;
       }
+      logger_warn("debug: not recv StatRes \n");
+      int new_fd = reregister_myid(opt.myid, opt, net_res);
       update_epoll_fd(epfd, *fd, new_fd);
       close(*fd);
       *fd = new_fd;
@@ -266,19 +294,20 @@ int main(int argc, char *argv[])
   logger_tinfo("* ", " %s started.\n", PROG_NAME);
   max_count = opt.msg_amount;
 
-  int fd = net_connect_recursive(opt.broker_host, opt.broker_port, (const char **)opt.broker_replicas,opt.broker_replicas_count);
+  struct network_result net_res = net_connect_recursive(opt.broker_host, opt.broker_port, (const char **)opt.broker_replicas, opt.broker_replicas_count);
+  int fd = net_res.data;
   if (fd < 0) {
     exit(-1);
   }
 
   cli_fdump(logger_fp(LOG_DEBUG), &opt);
 
-  struct network_result net_res = client_register(fd, opt.myid, MSG_ADDR_BROKER);
+  net_res = client_register(fd, opt.myid, MSG_ADDR_BROKER);
   while (net_res.status != NETWORK_STATUS_SUCCESS) {
+    logger_warn("failed to register myid %d. Now retry\n", opt.myid);
     close(fd);
-    sleep(1);
 
-    fd = net_reconnect(net_res, opt);
+    fd = net_reconnect(net_res, opt).data;
     net_res = client_register(fd, opt.myid, MSG_ADDR_BROKER);
   }
 
@@ -304,5 +333,6 @@ int main(int argc, char *argv[])
 
   int result = client_event_loop(&fd, opt, &handler, NULL);
   close(fd);
+  logger_warn("%s exiting.\n", PROG_NAME);
   return result;
 }

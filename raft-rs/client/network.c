@@ -21,8 +21,8 @@ struct network_result make_network_result(enum network_status status, int data, 
 
 	result.hint[0] = '\0';
 	if (hint){
-    strncpy(result.hint, hint, MSG_PAYLOAD_LEN - 1);
-    result.hint[MSG_PAYLOAD_LEN - 1] = '\0';
+    strncpy(result.hint, hint, NETWORK_HINT_LEN - 1);
+    result.hint[NETWORK_HINT_LEN - 1] = '\0';
   }
 
 	return result;
@@ -158,54 +158,84 @@ struct network_result net_create_service(const char *host, const char *service)
   }
 }
 
+// separate & return host and port from "host:service" string
+// Returns 0 on success, -1 on failure.
+// arguments:
+//   host_service: input string like "host:service"
+//   host: output buffer for host
+//   service: output buffer for service
+//   separator: separator character (usually ':')
+int separate_host_service(const char *host_service, char *host, size_t host_size, char *service, size_t service_size, char separator)
+{
+  const char *sep_pos = strchr(host_service, separator);
+  if (!sep_pos) {
+    return -1;
+  }
+
+  size_t host_len = sep_pos - host_service;
+  if (host_len >= host_size) {
+      return -1;  // host buffer too small
+  }
+  memcpy(host, host_service, host_len);
+  host[host_len] = '\0';
+
+  const char *service_src = sep_pos + 1;
+  size_t service_len = strlen(service_src);
+  if (service_len >= service_size) {
+      return -1;  // service buffer too small
+  }
+  memcpy(service, service_src, service_len + 1); // includes '\0'
+
+  return 0;
+}
+
+
 // Try to connect to multiple hosts recursively
 // Returns socket fd or -1 (on failue).
 //
-int net_connect_recursive(const char *host, const char *service, const char **alt_hosts, int alt_host_count)
+struct network_result net_connect_recursive(const char *host, const char *service, const char **alt_hosts_services, int alt_host_count)
 {
   struct network_result net_res = net_connect(host, service);
   int i = 0;
-  while (net_res.status != NETWORK_STATUS_SUCCESS && i < alt_host_count) {
-    logger_warn("trying to connect %s:%s ...\n",
-                alt_hosts[i],  service);
-    net_res = net_connect(alt_hosts[i], service);
-    i++;
+  while (net_res.status != NETWORK_STATUS_SUCCESS) {
+    char alt_host[16];
+    char alt_service[8];
+    if (separate_host_service(alt_hosts_services[i], alt_host, sizeof(alt_host), alt_service, sizeof(alt_service), ':') != 0) {
+      logger_error("invalid broker replica address: %s\n", alt_hosts_services[i]);
+      if (i >= alt_host_count - 1) {
+        i = 0;
+      } else {
+        i++;
+      }
+      continue;
+    }
+    // logger_warn("trying to connect %s:%s\n", alt_host, alt_service);
+    net_res = net_connect(alt_host, alt_service);
+    if (i >= alt_host_count - 1) {
+      i = 0;
+    } else {
+      i++;
+    }
   }
-  return net_res.data;
+  return net_res;
 }
 
-int net_reconnect(struct network_result old_net_res, struct cli_option opt) {
-  int fd;
-  struct network_result net_res = old_net_res;
+struct network_result net_reconnect(struct network_result current_net_res, struct cli_option opt) {
+  struct network_result net_res = current_net_res;
 
   if (net_res.status == NETWORK_STATUS_ERR_DO_REDIRECT) {
     char *new_broker = net_res.hint;
-    char *colon_pos = strchr(new_broker, ':');
-    if (colon_pos) {
-      *colon_pos = '\0';
-      strncpy(opt.broker_host, new_broker, sizeof(opt.broker_host) - 1);
-      opt.broker_host[sizeof(opt.broker_host) - 1] = '\0';
-      strncpy(opt.broker_port, colon_pos + 1, sizeof(opt.broker_port) - 1);
-      logger_info("redirecting to new broker %s:%s\n", opt.broker_host, opt.broker_port);
+    if (separate_host_service(new_broker, opt.broker_host, sizeof(opt.broker_host), opt.broker_port, sizeof(opt.broker_port), ':') == 0) {
+      logger_warn("redirecting to new broker %s:%s\n", opt.broker_host, opt.broker_port);
+      net_res = net_connect(opt.broker_host, opt.broker_port);
     } else {
       logger_error("invalid redirect hint: %s\n", new_broker);
-    }
-    net_res = net_connect(opt.broker_host, opt.broker_port);
-    fd = net_res.data;
-    if (fd < 0) {
-      logger_error("failed to connect %s:%s\n",
-                    opt.broker_host, opt.broker_port);
-      exit(-1);
+      net_res = make_network_result(NETWORK_STATUS_ERR_CONTENT, -1, "invalid broker address");
     }
   } else {
-    fd = net_connect_recursive(opt.broker_host, opt.broker_port, (const char **)opt.broker_replicas,opt.broker_replicas_count);
-    if (fd < 0) {
-      logger_error("failed to connect %s:%s\n",
-                    opt.broker_host, opt.broker_port);
-      exit(-1);
-    }
+    net_res = net_connect_recursive(opt.broker_host, opt.broker_port, (const char **)opt.broker_replicas,opt.broker_replicas_count);
   }
-  return fd;
+  return net_res;
 }
 
 // Receive ack message via FD.
@@ -222,6 +252,9 @@ struct network_result net_recv_ack(int fd, struct message *msg, int expected_msg
   }
 
   struct network_result net_res = net_recv_msg(fd, msg);
+  if (net_res.status != NETWORK_STATUS_SUCCESS) {
+    return net_res;
+  }
   if (msg->hdr.msg_type == MSG_NACK) {
     net_res.status = NETWORK_STATUS_ERR_DO_REDIRECT;
 
@@ -232,9 +265,9 @@ struct network_result net_recv_ack(int fd, struct message *msg, int expected_msg
     strncpy(hint, msg->payload + start_pos, hint_len);
     hint[hint_len] = '\0';
 
-    strncpy(net_res.hint, hint, MSG_PAYLOAD_LEN - 1);
-    net_res.hint[MSG_PAYLOAD_LEN - 1] = '\0';
-    printf("Client: Received redirect hint: %s\n", net_res.hint);
+    strncpy(net_res.hint, hint, NETWORK_HINT_LEN - 1);
+    net_res.hint[NETWORK_HINT_LEN - 1] = '\0';
+    // printf("Client: Received redirect hint: %s\n", net_res.hint);
     return net_res;
   }
 
@@ -270,17 +303,17 @@ struct network_result net_recv_msg(int fd, struct message *msg)
 
   int n = receive_fixed_length(fd, msg, MSG_TOTAL_LEN);
 
-  if (n != 0 && n != MSG_TOTAL_LEN) {
-    logger_error("message size (%d) != MS_TOTAL_LEN (%ld) FD(%d)\n", n, MSG_TOTAL_LEN, fd);
-    if (n == 0) {
+  switch (n) {
+    case 0:
+      logger_error("peer closed connection FD(%d)\n", fd);
       return make_network_result(NETWORK_STATUS_ERR_PEER_CLOSED, n, "peer closed connection");
-    } else {
-      return make_network_result(NETWORK_STATUS_ERR_RECV, n, "failed to receive message");
-    }
+    case MSG_TOTAL_LEN:
+      logger_ttrace("i", " "); msg_fdump(logger_fp(LOG_TRACE), msg);
+      return make_network_result(NETWORK_STATUS_SUCCESS, n, NULL);
+    default:
+      logger_error("message size (%d) != MS_TOTAL_LEN (%ld) FD(%d)\n", n, MSG_TOTAL_LEN, fd);
+      return make_network_result(NETWORK_STATUS_ERR_RECV, n, "failed to receive full message");
   }
-
-  logger_ttrace("i", " "); msg_fdump(logger_fp(LOG_TRACE), msg);
-  return make_network_result(NETWORK_STATUS_SUCCESS, n, NULL);
 }
 
 // Send ack message corresponding to ORIG_MSG via FD.

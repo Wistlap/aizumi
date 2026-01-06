@@ -5,7 +5,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use nix::sys::socket::{setsockopt, sockopt};
-use slog::{debug, Drain};
+use slog::{Drain, debug, warn};
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -29,6 +29,7 @@ use super::queue::{MQueue, MQueuePool};
 
 const LEADER_NODE: u64 = 6555;
 const RAFT_PORT_OFFSET: u64 = 1000;
+const RAFT_TICK_MILLIS: u64 = 100;
 
 pub fn start_raft(
     proposals: Arc<Mutex<VecDeque<Proposal>>>,
@@ -115,7 +116,7 @@ pub fn start_raft(
                         break;
                     }
                     Err(_) => {
-                        thread::sleep(Duration::from_millis(100));
+                        thread::sleep(Duration::from_millis(RAFT_TICK_MILLIS));
                         continue;
                     }
                 }
@@ -143,7 +144,7 @@ pub fn start_raft(
         // Peer 1 is the leader.
         LEADER_NODE => Node::create_raft_leader(1, streams, &logger, mq_pool),
         // Other peers are followers.
-        _ => Node::create_raft_follower(streams),
+        _ => Node::create_raft_follower(streams, mq_pool),
     };
 
     // A global pending proposals queue. New proposals will be pushed back into the queue, and
@@ -234,35 +235,39 @@ fn run_node(
             t = Instant::now();
         }
 
-        // Handle new proposals.
-        let mut proposals_lock = proposals.lock().unwrap();
-        let mut deny_indexes: Vec<usize> = Vec::new();
-        for (idx, p) in proposals_lock.iter_mut().enumerate().skip_while(|(_, p)| p.proposed > 0) {
-            // TODO: タイムスタンプ ログの追加
-            // // key に対応するキューに挿入
-            // raft_timer.lock().unwrap().entry(msg.index).or_default().push((1, time_now()));
+        let raft_state = raft_group.raft.state;
 
-            // Let the leader pick pending proposals from the global queue.
-            if raft_group.raft.state == StateRole::Leader {
-                propose(raft_group, p);
+        // Handle new proposals.
+        {
+            let mut proposals_lock = proposals.lock().unwrap();
+            let mut deny_indexes: Vec<usize> = Vec::new();
+            for (idx, p) in proposals_lock.iter_mut().enumerate().skip_while(|(_, p)| p.proposed > 0) {
+                // TODO: タイムスタンプ ログの追加
+                // // key に対応するキューに挿入
+                // raft_timer.lock().unwrap().entry(msg.index).or_default().push((1, time_now()));
+
+                // Let the leader pick pending proposals from the global queue.
+                if raft_state == StateRole::Leader {
+                    propose(raft_group, p);
+                }
+                else if let Some(leader_addr) = node_addrs.get(&raft_group.raft.leader_id).cloned() {
+                    let res = ProposalData::LeaderInfo(leader_addr);
+                    p.propose_success.send(res).unwrap();
+                    deny_indexes.push(idx);
+                }
             }
-            else if let Some(leader_addr) = node_addrs.get(&raft_group.raft.leader_id).cloned() {
-                let res = ProposalData::LeaderInfo(leader_addr);
-                p.propose_success.send(res).unwrap();
-                deny_indexes.push(idx);
+            if raft_state != StateRole::Leader {
+                for &idx in deny_indexes.iter().rev() {
+                    proposals_lock.remove(idx);
+                }
             }
         }
-        if raft_group.raft.state != StateRole::Leader {
-            for &idx in deny_indexes.iter().rev() {
-                proposals_lock.remove(idx);
-            }
-        }
-        drop(proposals_lock);
 
         let raft_timer_c = Arc::clone(&raft_timer);
         // Handle readies from the raft.
         on_ready(
             raft_group,
+            raft_state,
             Arc::clone(&node.mq_pool),
             &mut send_txs,
             &proposals,
@@ -286,7 +291,12 @@ fn treat_recv_stream(
             Ok(_) => {
                 let size = u32::from_be_bytes(size_buf) as usize;
                 let mut buf = vec![0; size];
-                recv_stream.read_exact(&mut buf).unwrap();
+                if let Err(e) = recv_stream.read_exact(&mut buf) {
+                    error!(logger, "Error in function treat_recv_stream: {}", e);
+                    // TODO: コネクションの回復処理
+                    thread::sleep(Duration::from_secs(20));
+                    continue;
+                }
                 let msg = Message::parse_from_bytes(&buf);
                 if let Ok(msg) = msg {
                     debug!(logger, "{:?}", msg);
@@ -306,7 +316,9 @@ fn treat_recv_stream(
             },
             Err(e) => {
                 error!(logger, "Error in function treat_recv_stream: {}", e);
-                break;
+                // TODO: コネクションの回復処理
+                thread::sleep(Duration::from_secs(20));
+                continue;
             }
         }
     }
@@ -332,12 +344,17 @@ fn treat_send_stream(
             let to = msg.to;
             let bytes = msg.write_to_bytes().unwrap();
             let size = bytes.len();
-            send_stream.write_all(&size.to_be_bytes()).unwrap();
-            if send_stream.write_all(&bytes).is_err() {
-                error!(
-                    logger,
-                    "send raft message to {} fail, let Raft retry it", to
-                );
+            if let Err(e) = send_stream.write_all(&size.to_be_bytes()) {
+                error!(logger, "send raft message size to node{} fail: {}, let Raft retry it", to, e);
+                // TODO: コネクションの回復処理
+                thread::sleep(Duration::from_secs(20));
+                continue;
+            }
+            if let Err(e) = send_stream.write_all(&bytes) {
+                error!(logger, "send raft message to node{} fail: {}, let Raft retry it", to, e);
+                // TODO: コネクションの回復処理
+                thread::sleep(Duration::from_secs(20));
+                continue;
             }
 
             if let Some(msg_ids) = le_bytes_to_u32_vec(msg.get_context()) {
@@ -406,11 +423,12 @@ impl Node {
     // Create a raft follower.
     fn create_raft_follower(
         streams: BTreeMap<u64, (TcpStream, TcpStream)>,
+        mq_pool: Arc<RwLock<MQueuePool>>,
     ) -> Self {
         Node {
             raft_group: None,
             streams,
-            mq_pool: Arc::new(RwLock::new(MQueuePool::new())),
+            mq_pool,
         }
     }
 
@@ -440,8 +458,10 @@ impl Node {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn on_ready(
     raft_group: &mut RawNode<MemStorage>,
+    raft_state: StateRole,
     mq_pool: Arc<RwLock<MQueuePool>>,
     send_txs: &mut BTreeMap<u64, Sender<Vec<Message>>>,
     proposals: &Mutex<VecDeque<Proposal>>,
@@ -542,7 +562,7 @@ fn on_ready(
                                 }
                             };
                             drop(mq_pool);
-                            debug!(logger, "peer {}: process SendReq: {:?}", rn.raft.id, msg.header.id);
+                            debug!(logger, "n{}: SendReq{:?}, dest{:?}", rn.raft.id, msg.header.id, msg.header.daddr);
                             mqueue.write().unwrap().waiting_queue.enqueue(msg);
                             None
                         }
@@ -557,8 +577,8 @@ fn on_ready(
                                 .write()
                                 .unwrap()
                                 .delivered_queue
-                                .dequeue_by(|queued_msg| queued_msg.header.id == msg_id)
-                                .unwrap();
+                                .dequeue_by(|queued_msg| queued_msg.header.id == msg_id);
+                                // .unwrap();
                             debug!(logger, "peer {}: process FreeReq: {:?}", rn.raft.id, msg_id);
                             None
                         }
@@ -568,18 +588,31 @@ fn on_ready(
                                 let mq_pool = mq_pool.read().unwrap();
                                 mq_pool.find_by_id(saddr).unwrap().clone()
                             };
-                            let mut mqueue = mqueue.write().unwrap();
+                            // println!("PushReq processing for peer {}: to {:?}", rn.raft.id, saddr);
+                            let mqueue = mqueue.read().unwrap();
                             if is_ready_to_send(&mqueue) {
-                                let mut msg = mqueue.waiting_queue.dequeue().unwrap();
+                                let mut msg = mqueue.waiting_queue.get_front().unwrap();
                                 msg.header.change_msg_type(MbMessageType::PushReq);
                                 // timer.append(msg.header.id, msg.header.msg_type(), time_now());
                                 // stream.send_msg(&mut msg).unwrap();
-                                mqueue.delivered_queue.enqueue(msg.clone());
                                 debug!(logger, "peer {}: process inner PushReq or Timeout: {:?}", rn.raft.id, msg.header.id);
                                 Some(msg)
                             } else {
                                 None
                             }
+                        }
+                        MbMessageType::PushAck => {
+                            let saddr = msg.header.saddr;
+                            let mqueue = {
+                                let mq_pool = mq_pool.read().unwrap();
+                                mq_pool.find_by_id(saddr).unwrap().clone()
+                            };
+                            let mut mqueue = mqueue.write().unwrap();
+                            let mut msg = mqueue.waiting_queue.dequeue().unwrap();
+                            msg.header.change_msg_type(MbMessageType::PushReq);
+                            debug!(logger, "peer {}: process wq -> dq: {:?}", rn.raft.id, msg.header.id);
+                            mqueue.delivered_queue.enqueue(msg);
+                            None
                         }
                         MbMessageType::HeloReq => {
                             let client_id = msg.header.saddr;
@@ -589,7 +622,7 @@ fn on_ready(
                                     mq_pool.add(client_id, MQueue::new(client_id));
                                 };
                             }
-                            debug!(logger, "peer {}: process HeloReq: {:?}", rn.raft.id, msg.header.id);
+                            warn!(logger, "peer {}: process Helo client: {:?}", rn.raft.id, msg.header.saddr);
                             None
                         }
                         MbMessageType::StatReq => {
@@ -612,13 +645,14 @@ fn on_ready(
                     // raft_timer.lock().unwrap().append(msg_id, node_id as u32, RaftTimestampType::AfterStateMachineApply, time_now());
                     res
                 };
-                if rn.raft.state == StateRole::Leader {
+                if raft_state == StateRole::Leader {
                     // The leader should response to the clients, tell them if their proposals
                     // succeeded or not.
-                    let proposal = proposals.lock().unwrap().pop_front().unwrap();
-                    match le_bytes_to_u32(&entry.context) {
-                        Some(msg_id) => proposal.propose_success.send(ProposalData::QueueOpResult((res, raft_timer.lock().unwrap().take(msg_id)))).unwrap(),
-                        None => proposal.propose_success.send(ProposalData::QueueOpResult((res, None))).unwrap(),
+                    if let Some(proposal) = proposals.lock().unwrap().pop_front() {
+                        match le_bytes_to_u32(&entry.context) {
+                            Some(msg_id) => proposal.propose_success.send(ProposalData::QueueOpResult((res, raft_timer.lock().unwrap().take(msg_id)))).unwrap(),
+                            None => proposal.propose_success.send(ProposalData::QueueOpResult((res, None))).unwrap(),
+                        }
                     }
                 }
             }
